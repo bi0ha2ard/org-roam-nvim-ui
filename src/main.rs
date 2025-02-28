@@ -36,8 +36,8 @@ struct Link {
 
 struct Graph {
     nodes: Vec<Node>,
-    links: Vec<Link>,
-    backlinks: Vec<Link>,
+    links: Vec<Link>,     // from -> to, sorted by from
+    backlinks: Vec<Link>, // from -> to, sorted by to
 }
 
 impl Graph {
@@ -79,7 +79,7 @@ impl Graph {
             }
         }
         links.sort_by_key(|l| l.from);
-        backlinks.sort_by_key(|l| l.from);
+        backlinks.sort_by_key(|l| l.to);
         Graph {
             nodes,
             links,
@@ -98,9 +98,33 @@ impl Graph {
     fn backlinks(&self, id: usize) -> impl Iterator<Item = &Node> {
         self.backlinks
             .iter()
-            .skip_while(move |l| id != l.from)
-            .take_while(move |l| id == l.from)
+            .skip_while(move |l| id != l.to)
+            .take_while(move |l| id == l.to)
             .map(|l| self.nodes.get(l.to).unwrap())
+    }
+
+    fn dot(&self) -> String {
+        let mut res = String::new();
+        res.push_str("digraph {");
+        for n in &self.nodes {
+            res.push_str(&format!("\"{}\";\n", n.title));
+        }
+        for l in &self.links {
+            res.push_str(&format!(
+                "\"{}\" -> \"{}\" [color=blue];\n",
+                self.nodes.get(l.from).unwrap().title,
+                self.nodes.get(l.to).unwrap().title
+            ));
+        }
+        for l in &self.backlinks {
+            res.push_str(&format!(
+                "\"{}\" -> \"{}\" [color=red];\n",
+                self.nodes.get(l.to).unwrap().title,
+                self.nodes.get(l.from).unwrap().title
+            ));
+        }
+        res.push('}');
+        res
     }
 }
 
@@ -114,13 +138,5 @@ fn main() {
     let db: Database = serde_json::from_reader(std::io::BufReader::new(file)).expect("Parse");
     let g = Graph::from(db);
 
-    for n in &g.nodes {
-        println!("{:>4}: {} ({})", n.id, n.title, n.uuid);
-        for l in g.links(n.id) {
-            println!("        > {}", l.title);
-        }
-        for l in g.backlinks(n.id) {
-            println!("        < {}", l.title);
-        }
-    }
+    print!("{}", g.dot());
 }
