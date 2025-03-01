@@ -1,5 +1,6 @@
+use eframe::egui;
 use itertools::Itertools;
-use nalgebra::{Point2, Vector2};
+use nalgebra::{Point2, Vector2, clamp};
 use rand::SeedableRng;
 use std::collections::HashMap;
 
@@ -32,6 +33,7 @@ struct Node {
     mtime: u64,
 }
 
+#[derive(PartialEq)]
 struct Link {
     from: usize,
     to: usize,
@@ -107,7 +109,9 @@ impl Graph {
     }
 
     fn is_connected(&self, from: usize, to: usize) -> bool {
-        self.links.iter().find(|l| (l.from == from && l.to == to) || (l.from == to && l.to == from)).is_some()
+        self.links
+            .iter()
+            .any(|l| (l.from == from && l.to == to) || (l.from == to && l.to == from))
     }
 
     fn dot(&self) -> String {
@@ -147,27 +151,67 @@ struct PlacedNode {
 struct GraphLayout {
     // Current positions
     nodes: Vec<PlacedNode>,
+    links: Vec<Link>,
+    backlinks: Vec<Link>,
     rng: rand::rngs::StdRng,
 }
 
 impl GraphLayout {
-    fn new(nodes: &[Node], seed: u64) -> GraphLayout {
+    // New layout for nodes
+    fn new(nodes: &[Node], graph: &Graph, seed: u64) -> GraphLayout {
+        let nodes: Vec<PlacedNode> = nodes
+            .iter()
+            .map(|n| PlacedNode {
+                p: Point::origin(),
+                f: Vector::zeros(),
+                id: n.id,
+            })
+            .collect();
+        // TODO: factor out slicing of the graph?
+        let mut links = Vec::new();
+        let mut backlinks = Vec::new();
+        for (me, other) in nodes.iter().enumerate().tuple_combinations() {
+            if graph.links.contains(&Link {
+                from: me.1.id,
+                to: other.1.id,
+            }) {
+                links.push(Link {
+                    from: me.0,
+                    to: other.0,
+                });
+            }
+            if graph.backlinks.contains(&Link {
+                from: other.1.id,
+                to: me.1.id,
+            }) {
+                backlinks.push(Link {
+                    from: other.0,
+                    to: me.0,
+                });
+            }
+        }
+        links.sort_by_key(|l| l.from);
+        backlinks.sort_by_key(|l| l.to);
+
         GraphLayout {
-            nodes: nodes
-                .iter()
-                .map(|n| PlacedNode {
-                    p: Point::origin(),
-                    f: Vector::zeros(),
-                    id: n.id,
-                })
-                .collect(),
-            rng: rand::rngs::StdRng::seed_from_u64(seed)
+            nodes,
+            links,
+            backlinks,
+            rng: rand::rngs::StdRng::seed_from_u64(seed),
         }
     }
 
-    fn tick(&mut self, graph: &Graph, dt: f32) {
+    fn is_connected(&self, from: usize, to: usize) -> bool {
+        self.links
+            .iter()
+            .any(|l| (l.from == from && l.to == to) || (l.from == to && l.to == from))
+    }
+
+    fn tick(&mut self, dt: f32, force_min: f32, force_max: f32) -> bool {
         const MIN_DIST_FOR_DIR: f32 = 1e-6;
-        const DIST_FOR_LINKS: f32 = 1.0;
+        const LINK_FORCE_MULT: f32 = 4.0;
+        const DIST_FOR_LINKS: f32 = 10.0 * 10.0;
+        const MAX_DIST_FOR_FORCE: f32 = 20.0 * 20.0;
         let distribution = rand::distributions::Uniform::<f32>::new_inclusive(-1.0, 1.0);
         for n in &mut self.nodes {
             n.f = Vector::zeros();
@@ -184,23 +228,38 @@ impl GraphLayout {
             } else {
                 displacement.normalize()
             };
-            // Repelling
-            self.nodes[other].f += dt * dir.scale(1. / dist);
-            self.nodes[me].f += dt * dir.scale(-1. / dist);
-            // Attracting
-            if dist > DIST_FOR_LINKS && graph.is_connected(me, other) {
-                self.nodes[other].f -= dt * dir.scale(1. / dist);
-                self.nodes[me].f -= dt * dir.scale(-1. / dist);
+            let clamped_dist = clamp(dist, 0.01, 1e10);
+            let is_connected = self.is_connected(me, other);
+            if dist > DIST_FOR_LINKS && is_connected {
+                // Attracting
+                let f = LINK_FORCE_MULT * dt * dir.scale(1. / clamped_dist.min(9.));
+                self.nodes[other].f -= f;
+                self.nodes[me].f += f;
             }
+            if dist > MAX_DIST_FOR_FORCE {
+                continue;
+            }
+            if is_connected && dist <= DIST_FOR_LINKS + 1. && dist > DIST_FOR_LINKS - 1. {
+                continue;
+            }
+            // Repelling
+            self.nodes[other].f += dt * dir.scale(1. / clamped_dist);
+            self.nodes[me].f += dt * dir.scale(-1. / clamped_dist);
         }
+        let mut skipped = 0;
         for n in &mut self.nodes {
-            // TODO: clamp forces
-            n.p += n.f;
+            let len = n.f.norm().min(force_max);
+            if len < force_min {
+                skipped += 1;
+                continue;
+            }
+            n.p += n.f.normalize() * len;
         }
+        skipped == self.nodes.len()
     }
 }
 
-fn main() {
+fn load_graph() -> Graph {
     const DB_FNAME: &str = "db_pretty.json";
     const ORG_ROAM_SHARE_DIR: &str = ".local/share/nvim/org-roam.nvim";
     let roam_share_loc = std::path::Path::new(&std::env::var_os("HOME").expect("home"))
@@ -208,7 +267,123 @@ fn main() {
         .join(DB_FNAME);
     let file = std::fs::File::open(roam_share_loc).expect("Open");
     let db: Database = serde_json::from_reader(std::io::BufReader::new(file)).expect("Parse");
-    let g = Graph::from(db);
+    Graph::from(db)
+}
 
-    print!("{}", g.dot());
+struct State {
+    dt: f32,
+    force_min: f32,
+    force_max: f32,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            dt: 0.2,
+            force_min: 0.002,
+            force_max: 1.0,
+        }
+    }
+}
+
+struct RoamUI {
+    graph: Graph,
+    layout: GraphLayout,
+    state: State,
+}
+
+impl RoamUI {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // customization here
+        let graph = load_graph();
+        let layout = GraphLayout::new(&graph.nodes, &graph, 0);
+        Self {
+            graph,
+            layout,
+            state: State::default(),
+        }
+    }
+}
+
+impl eframe::App for RoamUI {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Q)) {
+                ctx.send_viewport_cmd(egui::viewport::ViewportCommand::Close);
+            }
+            ui.add(egui::Slider::new(&mut self.state.dt, 0.001_f32..=1.));
+            ui.add(egui::Slider::new(&mut self.state.force_max, 1_f32..=10.));
+            ui.add(egui::Slider::new(&mut self.state.force_min, 0_f32..=1.));
+            if ui.button("Reset").clicked() {
+                for n in &mut self.layout.nodes {
+                    n.p = Point::origin();
+                }
+            }
+            let offs = ui.min_size() / 2.0;
+            let painter = ui.painter();
+            let settled =
+                self.layout
+                    .tick(self.state.dt, self.state.force_min, self.state.force_max);
+            let mut selected_node = None;
+            const RADIUS: f32 = 5.0;
+            let conn_stroke = egui::Stroke::new(1.0, egui::Color32::RED);
+            for l in &self.layout.links {
+                let left = self.layout.nodes.get(l.from).unwrap();
+                let right = self.layout.nodes.get(l.to).unwrap();
+                painter.line_segment(
+                    [
+                        egui::Pos2 {
+                            x: left.p.x,
+                            y: left.p.y,
+                        } * 5.
+                            + offs,
+                        egui::Pos2 {
+                            x: right.p.x,
+                            y: right.p.y,
+                        } * 5.
+                            + offs,
+                    ],
+                    conn_stroke,
+                );
+            }
+            for n in &self.layout.nodes {
+                let pos = egui::Pos2 { x: n.p.x, y: n.p.y } * 5. + offs;
+                let selected = ctx
+                    .pointer_latest_pos()
+                    .map(|p| (p - pos).length_sq() <= RADIUS * RADIUS)
+                    .unwrap_or(false);
+                painter.circle_filled(
+                    pos,
+                    RADIUS,
+                    if selected {
+                        egui::Color32::BLUE
+                    } else {
+                        egui::Color32::RED
+                    },
+                );
+                if selected {
+                    selected_node = Some(n.id);
+                }
+            }
+            if let Some(id) = selected_node {
+                let n = self.graph.nodes.get(id).unwrap();
+                egui::show_tooltip_at_pointer(ctx, painter.layer_id(), egui::Id::new("title"), |ui| {
+                    let label = egui::Label::new(&n.title).wrap_mode(egui::TextWrapMode::Extend);
+                    ui.add(label);
+                });
+            }
+            if !settled {
+                ctx.request_repaint();
+            }
+        });
+    }
+}
+
+fn main() {
+    let native_options = eframe::NativeOptions::default();
+    let _ = eframe::run_native(
+        "My egui App",
+        native_options,
+        Box::new(|cc| Ok(Box::new(RoamUI::new(cc)))),
+    );
 }

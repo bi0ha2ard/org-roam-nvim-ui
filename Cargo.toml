@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+eframe = { version = "0.31.0", default-features = false, features = ["default_fonts", "x11", "wayland", "glow"] }
+egui = "0.31.0"
 itertools = "0.14.0"
 nalgebra = { version = "0.33.2", features = ["rand"] }
 rand = "*"
