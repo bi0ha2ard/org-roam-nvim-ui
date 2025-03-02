@@ -1,6 +1,7 @@
 use eframe::egui;
+use egui::Pos2;
 use itertools::Itertools;
-use nalgebra::{Point2, Vector2, clamp};
+use nalgebra::{Point2, Similarity2, Translation2, Vector2, clamp};
 use rand::SeedableRng;
 use std::collections::HashMap;
 
@@ -154,6 +155,7 @@ struct GraphLayout {
     links: Vec<Link>,
     backlinks: Vec<Link>,
     rng: rand::rngs::StdRng,
+    to_screen: Similarity2<f32>,
 }
 
 impl GraphLayout {
@@ -198,7 +200,24 @@ impl GraphLayout {
             links,
             backlinks,
             rng: rand::rngs::StdRng::seed_from_u64(seed),
+            to_screen: Similarity2::identity(),
         }
+    }
+
+    fn len_to_screen(&self, length: f32) -> f32 {
+        self.to_screen.scaling() * length
+    }
+
+    fn pt_to_screen(&self, p: Point) -> egui::Pos2 {
+        let p_screen = self.to_screen * p;
+        egui::Pos2 {
+            x: p_screen.x,
+            y: p_screen.y,
+        }
+    }
+
+    fn node_screen_pos(&self, node: usize) -> egui::Pos2 {
+        self.pt_to_screen(self.nodes.get(node).unwrap().p)
     }
 
     fn is_connected(&self, from: usize, to: usize) -> bool {
@@ -274,6 +293,8 @@ struct State {
     dt: f32,
     force_min: f32,
     force_max: f32,
+    zoom: f32,
+    offset: egui::Vec2,
 }
 
 impl Default for State {
@@ -282,6 +303,8 @@ impl Default for State {
             dt: 0.2,
             force_min: 0.002,
             force_max: 1.0,
+            zoom: 1.,
+            offset: egui::Vec2::default(),
         }
     }
 }
@@ -319,42 +342,42 @@ impl eframe::App for RoamUI {
                     n.p = Point::origin();
                 }
             }
+            // TODO: Filter to only the painter this only on the background?
+            ui.input(|i| {
+                if i.smooth_scroll_delta.y != 0. {
+                    self.state.zoom = (self.state.zoom + (self.state.zoom / 400.).clamp(0., 0.1) * i.smooth_scroll_delta.y)
+                        .clamp(0.1, 400.0);
+                }
+                if i.pointer.is_decidedly_dragging() {
+                    self.state.offset += i.pointer.delta()
+                }
+            });
+            self.layout.to_screen.set_scaling(self.state.zoom);
+            self.layout.to_screen.isometry.translation.x = self.state.offset.x;
+            self.layout.to_screen.isometry.translation.y = self.state.offset.y;
             let offs = ui.min_size() / 2.0;
             let painter = ui.painter();
             let settled =
                 self.layout
                     .tick(self.state.dt, self.state.force_min, self.state.force_max);
             let mut selected_node = None;
-            const RADIUS: f32 = 5.0;
+            const RADIUS: f32 = 1.0;
+            let radius_screen = self.layout.len_to_screen(RADIUS);
             let conn_stroke = egui::Stroke::new(1.0, egui::Color32::RED);
             for l in &self.layout.links {
-                let left = self.layout.nodes.get(l.from).unwrap();
-                let right = self.layout.nodes.get(l.to).unwrap();
-                painter.line_segment(
-                    [
-                        egui::Pos2 {
-                            x: left.p.x,
-                            y: left.p.y,
-                        } * 5.
-                            + offs,
-                        egui::Pos2 {
-                            x: right.p.x,
-                            y: right.p.y,
-                        } * 5.
-                            + offs,
-                    ],
-                    conn_stroke,
-                );
+                let left = self.layout.node_screen_pos(l.from);
+                let right = self.layout.node_screen_pos(l.to);
+                painter.line_segment([left + offs, right + offs], conn_stroke);
             }
             for n in &self.layout.nodes {
-                let pos = egui::Pos2 { x: n.p.x, y: n.p.y } * 5. + offs;
+                let pos = self.layout.pt_to_screen(n.p) + offs;
                 let selected = ctx
                     .pointer_latest_pos()
-                    .map(|p| (p - pos).length_sq() <= RADIUS * RADIUS)
+                    .map(|p| (p - pos).length_sq() <= radius_screen * radius_screen)
                     .unwrap_or(false);
                 painter.circle_filled(
                     pos,
-                    RADIUS,
+                    radius_screen,
                     if selected {
                         egui::Color32::BLUE
                     } else {
@@ -367,10 +390,16 @@ impl eframe::App for RoamUI {
             }
             if let Some(id) = selected_node {
                 let n = self.graph.nodes.get(id).unwrap();
-                egui::show_tooltip_at_pointer(ctx, painter.layer_id(), egui::Id::new("title"), |ui| {
-                    let label = egui::Label::new(&n.title).wrap_mode(egui::TextWrapMode::Extend);
-                    ui.add(label);
-                });
+                egui::show_tooltip_at_pointer(
+                    ctx,
+                    painter.layer_id(),
+                    egui::Id::new("title"),
+                    |ui| {
+                        let label =
+                            egui::Label::new(&n.title).wrap_mode(egui::TextWrapMode::Extend);
+                        ui.add(label);
+                    },
+                );
             }
             if !settled {
                 ctx.request_repaint();
