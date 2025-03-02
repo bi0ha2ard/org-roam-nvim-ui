@@ -309,6 +309,12 @@ impl Default for State {
     }
 }
 
+impl State {
+    fn text_alpha(&self) -> f32 {
+        ((self.zoom - 10.) / 20.).clamp(0., 1.)
+    }
+}
+
 struct RoamUI {
     graph: Graph,
     layout: GraphLayout,
@@ -334,7 +340,7 @@ impl eframe::App for RoamUI {
             if ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Q)) {
                 ctx.send_viewport_cmd(egui::viewport::ViewportCommand::Close);
             }
-            ui.add(egui::Slider::new(&mut self.state.dt, 0.001_f32..=1.));
+            ui.add(egui::Slider::new(&mut self.state.dt, 0.001_f32..=5.));
             ui.add(egui::Slider::new(&mut self.state.force_max, 1_f32..=10.));
             ui.add(egui::Slider::new(&mut self.state.force_min, 0_f32..=1.));
             if ui.button("Reset").clicked() {
@@ -345,16 +351,19 @@ impl eframe::App for RoamUI {
             // TODO: Filter to only the painter this only on the background?
             ui.input(|i| {
                 if i.smooth_scroll_delta.y != 0. {
-                    self.state.zoom = (self.state.zoom + (self.state.zoom / 400.).clamp(0., 0.1) * i.smooth_scroll_delta.y)
+                    self.state.zoom = (self.state.zoom
+                        + (self.state.zoom / 400.).clamp(0., 0.1) * i.smooth_scroll_delta.y)
                         .clamp(0.1, 400.0);
                 }
                 if i.pointer.is_decidedly_dragging() {
                     self.state.offset += i.pointer.delta()
                 }
             });
+            // TODO: zoom to mouse pos
             self.layout.to_screen.set_scaling(self.state.zoom);
             self.layout.to_screen.isometry.translation.x = self.state.offset.x;
             self.layout.to_screen.isometry.translation.y = self.state.offset.y;
+
             let offs = ui.min_size() / 2.0;
             let painter = ui.painter();
             let settled =
@@ -364,6 +373,7 @@ impl eframe::App for RoamUI {
             const RADIUS: f32 = 1.0;
             let radius_screen = self.layout.len_to_screen(RADIUS);
             let conn_stroke = egui::Stroke::new(1.0, egui::Color32::RED);
+
             for l in &self.layout.links {
                 let left = self.layout.node_screen_pos(l.from);
                 let right = self.layout.node_screen_pos(l.to);
@@ -386,6 +396,22 @@ impl eframe::App for RoamUI {
                 );
                 if selected {
                     selected_node = Some(n.id);
+                }
+            }
+            let text_alpha = self.state.text_alpha();
+            if text_alpha > 0. {
+                let text_color =
+                    egui::Color32::from_rgba_unmultiplied(128, 128, 128, (text_alpha * 255.) as u8);
+                for n in &self.layout.nodes {
+                    painter.text(
+                        self.layout
+                            .pt_to_screen(n.p - Vector::new(0.0, 1.0) * (RADIUS + 0.5))
+                            + offs,
+                        egui::Align2::CENTER_CENTER,
+                        &self.graph.nodes.get(n.id).unwrap().title,
+                        egui::FontId::default(),
+                        text_color,
+                    );
                 }
             }
             if let Some(id) = selected_node {
