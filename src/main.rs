@@ -1,9 +1,8 @@
 use eframe::egui;
-use egui::Pos2;
 use itertools::Itertools;
-use nalgebra::{Point2, Similarity2, Translation2, Vector2, clamp};
+use nalgebra::{Point2, Similarity2, Vector2, clamp};
 use rand::SeedableRng;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, de::IgnoredAny};
 
@@ -44,6 +43,40 @@ struct Graph {
     nodes: Vec<Node>,
     links: Vec<Link>,     // from -> to, sorted by from
     backlinks: Vec<Link>, // from -> to, sorted by to
+}
+
+struct DfsIterator<'a> {
+    graph: &'a Graph,
+    to_visit: Vec<usize>,
+    visited: HashSet<usize>,
+}
+
+impl<'a> DfsIterator<'a> {
+    fn new(graph: &'a Graph, from: usize) -> DfsIterator<'a> {
+        DfsIterator {
+            graph,
+            to_visit: vec![from],
+            visited: HashSet::new(),
+        }
+    }
+}
+
+impl<'a> Iterator for DfsIterator<'a> {
+    type Item = &'a Node;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(next) = self.to_visit.pop() {
+            // TODO: allow limiting depth
+            self.visited.insert(next);
+            for nbrs in self.graph.direct_links(next) {
+                if !self.visited.contains(&nbrs.id) {
+                    self.to_visit.push(nbrs.id);
+                }
+            }
+            return Some(self.graph.nodes.get(next).expect("Node should be in graph"));
+        }
+        None
+    }
 }
 
 impl Graph {
@@ -93,7 +126,11 @@ impl Graph {
         }
     }
 
-    fn links(&self, id: usize) -> impl Iterator<Item = &Node> {
+    fn bfs(&self, id: usize) -> impl Iterator<Item = &Node> {
+        DfsIterator::new(self, id)
+    }
+
+    fn direct_links(&self, id: usize) -> impl Iterator<Item = &Node> {
         self.links
             .iter()
             .skip_while(move |l| id != l.from)
@@ -101,7 +138,7 @@ impl Graph {
             .map(|l| self.nodes.get(l.to).unwrap())
     }
 
-    fn backlinks(&self, id: usize) -> impl Iterator<Item = &Node> {
+    fn direct_backlinks(&self, id: usize) -> impl Iterator<Item = &Node> {
         self.backlinks
             .iter()
             .skip_while(move |l| id != l.to)
@@ -160,9 +197,11 @@ struct GraphLayout {
 
 impl GraphLayout {
     // New layout for nodes
-    fn new(nodes: &[Node], graph: &Graph, seed: u64) -> GraphLayout {
+    fn new<'a, It>(nodes: It, graph: &Graph, seed: u64) -> GraphLayout
+    where
+        It: Iterator<Item = &'a Node>,
+    {
         let nodes: Vec<PlacedNode> = nodes
-            .iter()
             .map(|n| PlacedNode {
                 p: Point::origin(),
                 f: Vector::zeros(),
@@ -289,7 +328,7 @@ fn load_graph() -> Graph {
     Graph::from(db)
 }
 
-struct State {
+struct ViewState {
     dt: f32,
     force_min: f32,
     force_max: f32,
@@ -297,7 +336,7 @@ struct State {
     offset: egui::Vec2,
 }
 
-impl Default for State {
+impl Default for ViewState {
     fn default() -> Self {
         Self {
             dt: 0.2,
@@ -309,66 +348,124 @@ impl Default for State {
     }
 }
 
-impl State {
+impl ViewState {
     fn text_alpha(&self) -> f32 {
         ((self.zoom - 10.) / 20.).clamp(0., 1.)
     }
 }
 
+struct Filter {
+    title: String,
+    show_connected: bool,
+}
+
 struct RoamUI {
     graph: Graph,
     layout: GraphLayout,
-    state: State,
+    view_state: ViewState,
+    filter: Filter,
 }
 
 impl RoamUI {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // customization here
         let graph = load_graph();
-        let layout = GraphLayout::new(&graph.nodes, &graph, 0);
+        let layout = GraphLayout::new(graph.nodes.iter(), &graph, 0);
         Self {
             graph,
             layout,
-            state: State::default(),
+            view_state: ViewState::default(),
+            filter: Filter {
+                title: String::new(),
+                show_connected: true,
+            },
         }
     }
-}
 
-impl eframe::App for RoamUI {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Q)) {
-                ctx.send_viewport_cmd(egui::viewport::ViewportCommand::Close);
+    fn apply_filter(&mut self) {
+        let title = self.filter.title.as_str();
+        if title.is_empty() {
+            self.layout = GraphLayout::new(self.graph.nodes.iter(), &self.graph, 0);
+        } else {
+            let case_sensitive = title.chars().any(|c| c.is_uppercase());
+            let lower_title = title.to_lowercase();
+            let matcher = |n: &&Node| {
+                if case_sensitive {
+                    n.title.contains(title)
+                } else {
+                    n.title.to_lowercase().contains(lower_title.as_str())
+                }
+            };
+            if !self.filter.show_connected {
+                self.layout =
+                    GraphLayout::new(self.graph.nodes.iter().filter(matcher), &self.graph, 0);
+            } else {
+                // TODO: 2-stage hilighting: direct and connected nodes
+                self.layout = GraphLayout::new(
+                    self.graph
+                        .nodes
+                        .iter()
+                        .filter(matcher)
+                        .flat_map(|n| self.graph.bfs(n.id))
+                        .unique_by(|n| n.id),
+                    &self.graph,
+                    0,
+                );
             }
-            ui.add(egui::Slider::new(&mut self.state.dt, 0.001_f32..=5.));
-            ui.add(egui::Slider::new(&mut self.state.force_max, 1_f32..=10.));
-            ui.add(egui::Slider::new(&mut self.state.force_min, 0_f32..=1.));
-            if ui.button("Reset").clicked() {
-                for n in &mut self.layout.nodes {
-                    n.p = Point::origin();
-                }
-            }
-            // TODO: Filter to only the painter this only on the background?
-            ui.input(|i| {
-                if i.smooth_scroll_delta.y != 0. {
-                    self.state.zoom = (self.state.zoom
-                        + (self.state.zoom / 400.).clamp(0., 0.1) * i.smooth_scroll_delta.y)
-                        .clamp(0.1, 400.0);
-                }
-                if i.pointer.is_decidedly_dragging() {
-                    self.state.offset += i.pointer.delta()
-                }
+        }
+    }
+
+    fn render_filter(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("filter")
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.label("Filter");
+                    let was_empty = self.filter.title.is_empty();
+                    let title_changed = ui
+                        .add(egui::TextEdit::singleline(&mut self.filter.title))
+                        .changed();
+                    let checkbox_changed = ui
+                        .checkbox(&mut self.filter.show_connected, "include connected nodes")
+                        .changed();
+                    if was_empty && self.filter.title.is_empty() {
+                        // Prevent re-render if filter hasn't changed
+                        return;
+                    }
+                    if title_changed || checkbox_changed {
+                        self.apply_filter();
+                    }
+                });
             });
+    }
+
+    fn render_graph(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if ui.ui_contains_pointer() {
+                ui.input(|i| {
+                    if i.smooth_scroll_delta.y != 0. {
+                        self.view_state.zoom = (self.view_state.zoom
+                            + (self.view_state.zoom / 400.).clamp(0., 0.1)
+                                * i.smooth_scroll_delta.y)
+                            .clamp(0.1, 400.0);
+                    }
+                    if i.pointer.is_decidedly_dragging() {
+                        self.view_state.offset += i.pointer.delta()
+                    }
+                });
+            }
             // TODO: zoom to mouse pos
-            self.layout.to_screen.set_scaling(self.state.zoom);
-            self.layout.to_screen.isometry.translation.x = self.state.offset.x;
-            self.layout.to_screen.isometry.translation.y = self.state.offset.y;
+            self.layout.to_screen.set_scaling(self.view_state.zoom);
+            self.layout.to_screen.isometry.translation.x = self.view_state.offset.x;
+            self.layout.to_screen.isometry.translation.y = self.view_state.offset.y;
 
             let offs = ui.min_size() / 2.0;
             let painter = ui.painter();
-            let settled =
-                self.layout
-                    .tick(self.state.dt, self.state.force_min, self.state.force_max);
+            let settled = self.layout.tick(
+                self.view_state.dt,
+                self.view_state.force_min,
+                self.view_state.force_max,
+            );
             let mut selected_node = None;
             const RADIUS: f32 = 1.0;
             let radius_screen = self.layout.len_to_screen(RADIUS);
@@ -398,7 +495,7 @@ impl eframe::App for RoamUI {
                     selected_node = Some(n.id);
                 }
             }
-            let text_alpha = self.state.text_alpha();
+            let text_alpha = self.view_state.text_alpha();
             if text_alpha > 0. {
                 let text_color =
                     egui::Color32::from_rgba_unmultiplied(128, 128, 128, (text_alpha * 255.) as u8);
@@ -431,6 +528,34 @@ impl eframe::App for RoamUI {
                 ctx.request_repaint();
             }
         });
+    }
+}
+
+impl eframe::App for RoamUI {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Q)) {
+            ctx.send_viewport_cmd(egui::viewport::ViewportCommand::Close);
+        }
+        egui::SidePanel::left("Graph Settings")
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.add(egui::Slider::new(&mut self.view_state.dt, 0.001_f32..=5.));
+                ui.add(egui::Slider::new(
+                    &mut self.view_state.force_max,
+                    1_f32..=10.,
+                ));
+                ui.add(egui::Slider::new(
+                    &mut self.view_state.force_min,
+                    0_f32..=1.,
+                ));
+                if ui.button("Reset").clicked() {
+                    for n in &mut self.layout.nodes {
+                        n.p = Point::origin();
+                    }
+                }
+            });
+        self.render_filter(ctx);
+        self.render_graph(ctx);
     }
 }
 
