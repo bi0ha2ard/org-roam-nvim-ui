@@ -403,18 +403,54 @@ struct Filter {
     show_connected: bool,
 }
 
-struct RightPanel {
-    last_size: f32,
-}
-
 struct RoamUI {
     graph: Graph,
     layout: GraphLayout,
     view_state: GraphViewState,
     filter: Filter,
     selected: Option<NodeDetails>,
-    right_panel: RightPanel,
+    history: History,
 }
+
+#[derive(Default)]
+struct History {
+    current: Option<usize>,
+    history: Vec<usize>,
+    redo: Vec<usize>,
+}
+
+impl History {
+    fn push(&mut self, next: Option<usize>) {
+        if let Some(curr) = self.current {
+            self.history.push(curr);
+        }
+        self.current = next;
+        self.redo.clear();
+    }
+
+    fn pop(&mut self) -> Option<usize> {
+        if self.history.is_empty() {
+            return self.current;
+        }
+        if let Some(curr) = self.current {
+            self.redo.push(curr);
+        }
+        self.current = self.history.pop();
+        self.current
+    }
+
+    fn unpop(&mut self) -> Option<usize> {
+        if self.redo.is_empty() {
+            return self.current;
+        }
+        if let Some(curr) = self.current {
+            self.history.push(curr);
+        }
+        self.current = self.redo.pop();
+        self.current
+    }
+}
+
 
 const RADIUS: f32 = 1.0;
 
@@ -432,7 +468,7 @@ impl RoamUI {
                 show_connected: true,
             },
             selected: None,
-            right_panel: RightPanel { last_size: 200. },
+            history: History::default(),
         }
     }
 
@@ -552,12 +588,34 @@ impl RoamUI {
     }
 
     fn select_node(&mut self, node: usize) {
-        // TODO: make this a stack
         self.selected = Some(self.graph.node_details(node));
+        self.history.push(Some(node));
     }
 
     fn deselect_node(&mut self) {
         self.selected = None;
+        self.history.push(None);
+    }
+
+    fn back(&mut self) {
+        if let Some(node) = self.history.pop() {
+            self.selected = Some(self.graph.node_details(node));
+        }
+    }
+
+    fn fwd(&mut self) {
+        if let Some(node) = self.history.unpop() {
+            self.selected = Some(self.graph.node_details(node));
+        }
+    }
+
+    fn handle_global_shortcuts(&mut self, input: &egui::InputState) {
+        if input.pointer.button_pressed(egui::PointerButton::Extra1) {
+            self.back();
+        }
+        if input.pointer.button_pressed(egui::PointerButton::Extra2) {
+            self.fwd();
+        }
     }
 
     fn render_graph(&mut self, ctx: &egui::Context) {
@@ -572,7 +630,7 @@ impl RoamUI {
                                 * i.smooth_scroll_delta.y)
                             .clamp(0.1, 400.0);
                     }
-                    if i.pointer.is_decidedly_dragging() {
+                    if i.pointer.primary_down() && i.pointer.is_decidedly_dragging() {
                         self.view_state.offset += i.pointer.delta()
                     }
                 });
@@ -694,14 +752,42 @@ impl eframe::App for RoamUI {
             self.select_node(next_selection);
         }
         self.render_graph(ctx);
+        ctx.input(|i| self.handle_global_shortcuts(i));
     }
 }
 
 fn main() {
     let native_options = eframe::NativeOptions::default();
     let _ = eframe::run_native(
-        "My egui App",
+        "org-roam-nvim-ui",
         native_options,
         Box::new(|cc| Ok(Box::new(RoamUI::new(cc)))),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::History;
+
+    #[test]
+    fn pushing() {
+        let mut h = History::default();
+        h.push(Some(1));
+        h.push(Some(2));
+        assert!(matches!(h.current, Some(2)));
+        assert_eq!(h.history, [1]);
+        assert!(h.redo.is_empty());
+
+        let res = h.pop();
+        assert!(matches!(res, Some(1)));
+        assert!(matches!(h.current, Some(1)));
+        assert!(h.history.is_empty());
+        assert_eq!(h.redo, [2]);
+
+        let res = h.unpop();
+        assert!(matches!(res, Some(2)));
+        assert!(matches!(h.current, Some(2)));
+        assert_eq!(h.history, [1]);
+        assert!(h.redo.is_empty());
+    }
 }
