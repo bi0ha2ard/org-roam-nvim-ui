@@ -45,18 +45,46 @@ struct Graph {
     backlinks: Vec<Link>, // from -> to, sorted by to
 }
 
+// TODO: reference the &str of the graph object
+struct NodeDetails {
+    node: usize,
+    links: Vec<(usize, String)>,     // target id, target title
+    backlinks: Vec<(usize, String)>, // source id, source title
+}
+
+#[derive(PartialEq)]
+enum DfsDirection {
+    Out,
+    In,
+    Both,
+}
+
+impl DfsDirection {
+    fn allows_out(&self) -> bool {
+        use DfsDirection::*;
+        *self == Out || *self == Both
+    }
+
+    fn allows_in(&self) -> bool {
+        use DfsDirection::*;
+        *self == In || *self == Both
+    }
+}
+
 struct DfsIterator<'a> {
     graph: &'a Graph,
     to_visit: Vec<usize>,
     visited: HashSet<usize>,
+    dir: DfsDirection,
 }
 
 impl<'a> DfsIterator<'a> {
-    fn new(graph: &'a Graph, from: usize) -> DfsIterator<'a> {
+    fn new(graph: &'a Graph, from: usize, dir: DfsDirection) -> DfsIterator<'a> {
         DfsIterator {
             graph,
             to_visit: vec![from],
             visited: HashSet::new(),
+            dir,
         }
     }
 }
@@ -68,9 +96,18 @@ impl<'a> Iterator for DfsIterator<'a> {
         if let Some(next) = self.to_visit.pop() {
             // TODO: allow limiting depth
             self.visited.insert(next);
-            for nbrs in self.graph.direct_links(next) {
-                if !self.visited.contains(&nbrs.id) {
-                    self.to_visit.push(nbrs.id);
+            if self.dir.allows_out() {
+                for nbrs in self.graph.direct_links(next) {
+                    if !self.visited.contains(&nbrs.id) {
+                        self.to_visit.push(nbrs.id);
+                    }
+                }
+            }
+            if self.dir.allows_in() {
+                for nbrs in self.graph.direct_backlinks(next) {
+                    if !self.visited.contains(&nbrs.id) {
+                        self.to_visit.push(nbrs.id);
+                    }
                 }
             }
             return Some(self.graph.nodes.get(next).expect("Node should be in graph"));
@@ -108,10 +145,10 @@ impl Graph {
             match v {
                 DBLink::Empty(_) => {}
                 DBLink::Links(l) => {
-                    for to in l.keys() {
+                    for backlink_source in l.keys() {
                         backlinks.push(Link {
-                            from: *tmp.get(k.as_str()).expect("from"),
-                            to: *tmp.get(to.as_str()).expect("to"),
+                            from: *tmp.get(backlink_source.as_str()).expect("from"),
+                            to: *tmp.get(k.as_str()).expect("to"),
                         });
                     }
                 }
@@ -127,7 +164,7 @@ impl Graph {
     }
 
     fn bfs(&self, id: usize) -> impl Iterator<Item = &Node> {
-        DfsIterator::new(self, id)
+        DfsIterator::new(self, id, DfsDirection::Both)
     }
 
     fn direct_links(&self, id: usize) -> impl Iterator<Item = &Node> {
@@ -143,13 +180,22 @@ impl Graph {
             .iter()
             .skip_while(move |l| id != l.to)
             .take_while(move |l| id == l.to)
-            .map(|l| self.nodes.get(l.to).unwrap())
+            .map(|l| self.nodes.get(l.from).unwrap())
     }
 
     fn is_connected(&self, from: usize, to: usize) -> bool {
         self.links
             .iter()
             .any(|l| (l.from == from && l.to == to) || (l.from == to && l.to == from))
+    }
+
+    fn node_details(&self, node: usize) -> NodeDetails {
+        let to_tuple = |l: &Node| (l.id, l.title.clone());
+        NodeDetails {
+            node,
+            links: self.direct_links(node).map(to_tuple).collect(),
+            backlinks: self.direct_backlinks(node).map(to_tuple).collect(),
+        }
     }
 
     fn dot(&self) -> String {
@@ -168,8 +214,8 @@ impl Graph {
         for l in &self.backlinks {
             res.push_str(&format!(
                 "\"{}\" -> \"{}\" [color=red];\n",
-                self.nodes.get(l.to).unwrap().title,
-                self.nodes.get(l.from).unwrap().title
+                self.nodes.get(l.from).unwrap().title,
+                self.nodes.get(l.to).unwrap().title
             ));
         }
         res.push('}');
@@ -201,7 +247,7 @@ impl GraphLayout {
     where
         It: Iterator<Item = &'a Node>,
     {
-        let nodes: Vec<PlacedNode> = nodes
+        let positioned_nodes: Vec<PlacedNode> = nodes
             .map(|n| PlacedNode {
                 p: Point::origin(),
                 f: Vector::zeros(),
@@ -209,33 +255,22 @@ impl GraphLayout {
             })
             .collect();
         // TODO: factor out slicing of the graph?
-        let mut links = Vec::new();
-        let mut backlinks = Vec::new();
-        for (me, other) in nodes.iter().enumerate().tuple_combinations() {
-            if graph.links.contains(&Link {
-                from: me.1.id,
-                to: other.1.id,
-            }) {
-                links.push(Link {
-                    from: me.0,
-                    to: other.0,
-                });
-            }
-            if graph.backlinks.contains(&Link {
-                from: other.1.id,
-                to: me.1.id,
-            }) {
-                backlinks.push(Link {
-                    from: other.0,
-                    to: me.0,
-                });
-            }
-        }
-        links.sort_by_key(|l| l.from);
-        backlinks.sort_by_key(|l| l.to);
+        let to_subgraph_id = |target: usize| -> Option<usize> {
+            positioned_nodes
+                .iter()
+                .find_position(|n| n.id == target)
+                .map(|(id, _)| id)
+        };
+        let to_subgraph_link =
+            |link: &Link| match (to_subgraph_id(link.from), to_subgraph_id(link.to)) {
+                (Some(from), Some(to)) => Some(Link { from, to }),
+                _ => None,
+            };
+        let links = graph.links.iter().flat_map(to_subgraph_link).collect();
+        let backlinks = graph.backlinks.iter().flat_map(to_subgraph_link).collect();
 
         GraphLayout {
-            nodes,
+            nodes: positioned_nodes,
             links,
             backlinks,
             rng: rand::rngs::StdRng::seed_from_u64(seed),
@@ -256,7 +291,12 @@ impl GraphLayout {
     }
 
     fn node_screen_pos(&self, node: usize) -> egui::Pos2 {
-        self.pt_to_screen(self.nodes.get(node).unwrap().p)
+        assert!(
+            self.nodes.get(node).is_some(),
+            "Expected {} in subgraph",
+            node
+        );
+        self.pt_to_screen(self.nodes.get(node).expect("node in subgraph").p)
     }
 
     fn is_connected(&self, from: usize, to: usize) -> bool {
@@ -328,15 +368,17 @@ fn load_graph() -> Graph {
     Graph::from(db)
 }
 
-struct ViewState {
+struct GraphViewState {
     dt: f32,
     force_min: f32,
     force_max: f32,
     zoom: f32,
     offset: egui::Vec2,
+    show_links: bool,
+    show_backlinks: bool,
 }
 
-impl Default for ViewState {
+impl Default for GraphViewState {
     fn default() -> Self {
         Self {
             dt: 0.2,
@@ -344,11 +386,13 @@ impl Default for ViewState {
             force_max: 1.0,
             zoom: 1.,
             offset: egui::Vec2::default(),
+            show_links: true,
+            show_backlinks: true,
         }
     }
 }
 
-impl ViewState {
+impl GraphViewState {
     fn text_alpha(&self) -> f32 {
         ((self.zoom - 10.) / 20.).clamp(0., 1.)
     }
@@ -359,12 +403,20 @@ struct Filter {
     show_connected: bool,
 }
 
+struct RightPanel {
+    last_size: f32,
+}
+
 struct RoamUI {
     graph: Graph,
     layout: GraphLayout,
-    view_state: ViewState,
+    view_state: GraphViewState,
     filter: Filter,
+    selected: Option<NodeDetails>,
+    right_panel: RightPanel,
 }
+
+const RADIUS: f32 = 1.0;
 
 impl RoamUI {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -374,11 +426,13 @@ impl RoamUI {
         Self {
             graph,
             layout,
-            view_state: ViewState::default(),
+            view_state: GraphViewState::default(),
             filter: Filter {
                 title: String::new(),
                 show_connected: true,
             },
+            selected: None,
+            right_panel: RightPanel { last_size: 200. },
         }
     }
 
@@ -439,10 +493,79 @@ impl RoamUI {
             });
     }
 
+    fn node_title_in_graph(
+        &self,
+        painter: &egui::Painter,
+        node: &PlacedNode,
+        offs: &egui::Vec2,
+        text_color: egui::Color32,
+    ) {
+        painter.text(
+            self.layout
+                .pt_to_screen(node.p - Vector::new(0.0, 1.0) * (RADIUS + 0.5))
+                + *offs,
+            egui::Align2::CENTER_CENTER,
+            &self.graph.nodes.get(node.id).unwrap().title,
+            egui::FontId::default(),
+            text_color,
+        );
+    }
+
+    fn render_selected(&self, ctx: &egui::Context) -> Option<usize> {
+        let Some(details) = &self.selected else {
+            return None;
+        };
+        let mut clicked = None;
+        let node = self.graph.nodes.get(details.node).expect("node exists");
+        egui::SidePanel::right("selected")
+            .exact_width(200.)
+            .show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(&node.title);
+                        ui.separator();
+                        // ui.label(format!(
+                        //     "ID: {}, UUID: {}, links: {}, backlinks: {}",
+                        //     node.id,
+                        //     node.uuid,
+                        //     details.links.len(),
+                        //     details.backlinks.len(),
+                        // ));
+                        // ui.separator();
+                        ui.label("Links");
+                        for (id, text) in &details.links {
+                            if ui.label(text).clicked() {
+                                clicked = Some(*id);
+                            }
+                        }
+                        ui.separator();
+                        ui.label("Backlinks");
+                        for (id, text) in &details.backlinks {
+                            if ui.label(text).clicked() {
+                                clicked = Some(*id);
+                            }
+                        }
+                    })
+                });
+            });
+        clicked
+    }
+
+    fn select_node(&mut self, node: usize) {
+        // TODO: make this a stack
+        self.selected = Some(self.graph.node_details(node));
+    }
+
+    fn deselect_node(&mut self) {
+        self.selected = None;
+    }
+
     fn render_graph(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
+            let mut clicked = false;
             if ui.ui_contains_pointer() {
                 ui.input(|i| {
+                    clicked = i.pointer.primary_clicked();
                     if i.smooth_scroll_delta.y != 0. {
                         self.view_state.zoom = (self.view_state.zoom
                             + (self.view_state.zoom / 400.).clamp(0., 0.1)
@@ -466,63 +589,73 @@ impl RoamUI {
                 self.view_state.force_min,
                 self.view_state.force_max,
             );
-            let mut selected_node = None;
-            const RADIUS: f32 = 1.0;
+            let mut hovered_node = None;
             let radius_screen = self.layout.len_to_screen(RADIUS);
             let conn_stroke = egui::Stroke::new(1.0, egui::Color32::RED);
+            let conn_stroke_back = egui::Stroke::new(1.0, egui::Color32::MAGENTA);
 
-            for l in &self.layout.links {
-                let left = self.layout.node_screen_pos(l.from);
-                let right = self.layout.node_screen_pos(l.to);
-                painter.line_segment([left + offs, right + offs], conn_stroke);
+            if self.view_state.show_links {
+                for l in &self.layout.links {
+                    let left = self.layout.node_screen_pos(l.from);
+                    let right = self.layout.node_screen_pos(l.to);
+                    painter.line_segment([left + offs, right + offs], conn_stroke);
+                }
+            }
+            if self.view_state.show_backlinks {
+                for l in &self.layout.backlinks {
+                    let left = self.layout.node_screen_pos(l.from);
+                    let right = self.layout.node_screen_pos(l.to);
+                    painter.line_segment([left + offs, right + offs], conn_stroke_back);
+                }
             }
             for n in &self.layout.nodes {
                 let pos = self.layout.pt_to_screen(n.p) + offs;
-                let selected = ctx
+                let mouse_over = ctx
                     .pointer_latest_pos()
                     .map(|p| (p - pos).length_sq() <= radius_screen * radius_screen)
                     .unwrap_or(false);
                 painter.circle_filled(
                     pos,
                     radius_screen,
-                    if selected {
+                    if mouse_over {
                         egui::Color32::BLUE
+                    } else if matches!(&self.selected.as_ref().map(|n|n.node), Some(id) if *id == n.id) {
+                        egui::Color32::ORANGE
                     } else {
                         egui::Color32::RED
                     },
                 );
-                if selected {
-                    selected_node = Some(n.id);
+                if mouse_over {
+                    hovered_node = Some(n.id);
                 }
+            }
+            if clicked && hovered_node.map(|n| self.select_node(n)).is_none() {
+                self.deselect_node();
             }
             let text_alpha = self.view_state.text_alpha();
-            if text_alpha > 0. {
-                let text_color =
-                    egui::Color32::from_rgba_unmultiplied(128, 128, 128, (text_alpha * 255.) as u8);
-                for n in &self.layout.nodes {
-                    painter.text(
-                        self.layout
-                            .pt_to_screen(n.p - Vector::new(0.0, 1.0) * (RADIUS + 0.5))
-                            + offs,
-                        egui::Align2::CENTER_CENTER,
-                        &self.graph.nodes.get(n.id).unwrap().title,
-                        egui::FontId::default(),
-                        text_color,
-                    );
+            let text_color =
+                egui::Color32::from_rgba_unmultiplied(128, 128, 128, (text_alpha * 255.) as u8);
+            for n in &self.layout.nodes {
+                if matches!(&self.selected.as_ref().map(|n|n.node), Some(id) if *id == n.id) {
+                    self.node_title_in_graph(painter, n, &offs, egui::Color32::ORANGE);
+                } else if text_alpha > 0. {
+                    self.node_title_in_graph(painter, n, &offs, text_color);
                 }
             }
-            if let Some(id) = selected_node {
-                let n = self.graph.nodes.get(id).unwrap();
-                egui::show_tooltip_at_pointer(
-                    ctx,
-                    painter.layer_id(),
-                    egui::Id::new("title"),
-                    |ui| {
-                        let label =
-                            egui::Label::new(&n.title).wrap_mode(egui::TextWrapMode::Extend);
-                        ui.add(label);
-                    },
-                );
+            if ui.ui_contains_pointer() {
+                if let Some(id) = hovered_node {
+                    let graph_node = self.graph.nodes.get(id).unwrap();
+                    egui::show_tooltip_at_pointer(
+                        ctx,
+                        painter.layer_id(),
+                        egui::Id::new("title"),
+                        |ui| {
+                            let label =
+                            egui::Label::new(&graph_node.title).wrap_mode(egui::TextWrapMode::Extend);
+                            ui.add(label);
+                        },
+                    );
+                }
             }
             if !settled {
                 ctx.request_repaint();
@@ -553,8 +686,13 @@ impl eframe::App for RoamUI {
                         n.p = Point::origin();
                     }
                 }
+                ui.checkbox(&mut self.view_state.show_links, "Show links");
+                ui.checkbox(&mut self.view_state.show_backlinks, "Show backlinks");
             });
         self.render_filter(ctx);
+        if let Some(next_selection) = self.render_selected(ctx) {
+            self.select_node(next_selection);
+        }
         self.render_graph(ctx);
     }
 }
