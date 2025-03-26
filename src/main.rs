@@ -267,7 +267,8 @@ type Vector = Vector2<f32>;
 struct PlacedNode {
     p: Point,  // Location
     f: Vector, // yet to be applied force
-    id: usize, // keep track of id in case we're filtered down later
+    layout_id: usize,
+    graph_node_id: usize, // keep track of id in case we're filtered down later
 }
 
 struct GraphLayout {
@@ -286,17 +287,19 @@ impl GraphLayout {
         It: Iterator<Item = &'a Node>,
     {
         let positioned_nodes: Vec<PlacedNode> = nodes
-            .map(|n| PlacedNode {
+            .enumerate()
+            .map(|(id, n)| PlacedNode {
                 p: Point::origin(),
                 f: Vector::zeros(),
-                id: n.id,
+                layout_id: id,
+                graph_node_id: n.id,
             })
             .collect();
         // TODO: factor out slicing of the graph?
         let to_subgraph_id = |target: usize| -> Option<usize> {
             positioned_nodes
                 .iter()
-                .find_position(|n| n.id == target)
+                .find_position(|n| n.graph_node_id == target)
                 .map(|(id, _)| id)
         };
         let to_subgraph_link =
@@ -337,10 +340,15 @@ impl GraphLayout {
         self.pt_to_screen(self.nodes.get(node).expect("node in subgraph").p)
     }
 
+    /// Checks connectedness based on sub-graph indices
     fn is_connected(&self, from: usize, to: usize) -> bool {
         self.links
             .iter()
             .any(|l| (l.from == from && l.to == to) || (l.from == to && l.to == from))
+    }
+
+    fn by_real_id(&self, actual_id: usize) -> Option<&PlacedNode> {
+        self.nodes.iter().find(|n| n.graph_node_id == actual_id)
     }
 
     fn tick(&mut self, dt: f32, force_min: f32, force_max: f32) -> bool {
@@ -412,8 +420,6 @@ struct GraphViewState {
     force_max: f32,
     zoom: f32,
     offset: egui::Vec2,
-    show_links: bool,
-    show_backlinks: bool,
 }
 
 impl Default for GraphViewState {
@@ -424,8 +430,6 @@ impl Default for GraphViewState {
             force_max: 1.0,
             zoom: 1.,
             offset: egui::Vec2::default(),
-            show_links: true,
-            show_backlinks: true,
         }
     }
 }
@@ -578,7 +582,7 @@ impl RoamUI {
                 .pt_to_screen(node.p - Vector::new(0.0, 1.0) * (RADIUS + 0.5))
                 + *offs,
             egui::Align2::CENTER_CENTER,
-            &self.graph.nodes.get(node.id).unwrap().title,
+            &self.graph.nodes.get(node.graph_node_id).unwrap().title,
             egui::FontId::default(),
             text_color,
         );
@@ -655,6 +659,45 @@ impl RoamUI {
         }
     }
 
+    fn draw_links(&self, painter: &egui::Painter, offs: egui::Vec2) {
+        let alpha = if self.selected.is_some() { 0.5 } else { 1.0 };
+        let regular_stroke = egui::Stroke::new(alpha, egui::Color32::YELLOW);
+
+        // All links
+        for l in &self.layout.links {
+            let left = self.layout.node_screen_pos(l.from);
+            let right = self.layout.node_screen_pos(l.to);
+            painter.line_segment([left + offs, right + offs], regular_stroke);
+        }
+
+        // Network around selected node
+        // TODO: also hilight non-direct edges/nodes better
+        // TODO: pre-compute this on selection?
+        if let Some((selection, in_layout)) = self.selected.as_ref().and_then(|s| {
+            if let Some(in_layout) = self.layout.by_real_id(s.node) {
+                return Some((s, in_layout));
+            }
+            None
+        }) {
+            let link_stroke = egui::Stroke::new(1.0, egui::Color32::RED);
+            let backlink_stroke = egui::Stroke::new(1.0, egui::Color32::MAGENTA);
+            for other_graph in self.graph.direct_links(selection.node) {
+                if let Some(other_placed) = self.layout.by_real_id(other_graph.id) {
+                    let left = self.layout.node_screen_pos(in_layout.layout_id);
+                    let right = self.layout.node_screen_pos(other_placed.layout_id);
+                    painter.line_segment([left + offs, right + offs], link_stroke);
+                }
+            }
+            for other_graph in self.graph.direct_backlinks(selection.node) {
+                if let Some(other_placed) = self.layout.by_real_id(other_graph.id) {
+                    let left = self.layout.node_screen_pos(other_placed.layout_id);
+                    let right = self.layout.node_screen_pos(in_layout.layout_id);
+                    painter.line_segment([left + offs, right + offs], backlink_stroke);
+                }
+            }
+        }
+    }
+
     fn render_graph(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             let mut clicked = false;
@@ -677,7 +720,7 @@ impl RoamUI {
             self.layout.to_screen.isometry.translation.x = self.view_state.offset.x;
             self.layout.to_screen.isometry.translation.y = self.view_state.offset.y;
 
-            let offs = ui.min_size() / 2.0;
+            let offs = ctx.input(|i| i.viewport().inner_rect).map(|r| r.max - r.min).unwrap_or_else(||ui.min_size()) / 2.0;
             let painter = ui.painter();
             let settled = self.layout.tick(
                 self.view_state.dt,
@@ -686,23 +729,9 @@ impl RoamUI {
             );
             let mut hovered_node = None;
             let radius_screen = self.layout.len_to_screen(RADIUS);
-            let conn_stroke = egui::Stroke::new(1.0, egui::Color32::RED);
-            let conn_stroke_back = egui::Stroke::new(1.0, egui::Color32::MAGENTA);
 
-            if self.view_state.show_links {
-                for l in &self.layout.links {
-                    let left = self.layout.node_screen_pos(l.from);
-                    let right = self.layout.node_screen_pos(l.to);
-                    painter.line_segment([left + offs, right + offs], conn_stroke);
-                }
-            }
-            if self.view_state.show_backlinks {
-                for l in &self.layout.backlinks {
-                    let left = self.layout.node_screen_pos(l.from);
-                    let right = self.layout.node_screen_pos(l.to);
-                    painter.line_segment([left + offs, right + offs], conn_stroke_back);
-                }
-            }
+            self.draw_links(painter, offs);
+
             for n in &self.layout.nodes {
                 let pos = self.layout.pt_to_screen(n.p) + offs;
                 let mouse_over = ctx
@@ -714,14 +743,14 @@ impl RoamUI {
                     radius_screen,
                     if mouse_over {
                         egui::Color32::BLUE
-                    } else if matches!(&self.selected.as_ref().map(|n|n.node), Some(id) if *id == n.id) {
+                    } else if matches!(&self.selected.as_ref().map(|n|n.node), Some(id) if *id == n.graph_node_id) {
                         egui::Color32::ORANGE
                     } else {
                         egui::Color32::RED
                     },
                 );
                 if mouse_over {
-                    hovered_node = Some(n.id);
+                    hovered_node = Some(n.graph_node_id);
                 }
             }
             if clicked && hovered_node.map(|n| self.select_node(n)).is_none() {
@@ -731,7 +760,7 @@ impl RoamUI {
             let text_color =
                 egui::Color32::from_rgba_unmultiplied(128, 128, 128, (text_alpha * 255.) as u8);
             for n in &self.layout.nodes {
-                if matches!(&self.selected.as_ref().map(|n|n.node), Some(id) if *id == n.id) {
+                if matches!(&self.selected.as_ref().map(|n|n.node), Some(id) if *id == n.graph_node_id) {
                     self.node_title_in_graph(painter, n, &offs, egui::Color32::ORANGE);
                 } else if text_alpha > 0. {
                     self.node_title_in_graph(painter, n, &offs, text_color);
@@ -781,8 +810,6 @@ impl eframe::App for RoamUI {
                         n.p = Point::origin();
                     }
                 }
-                ui.checkbox(&mut self.view_state.show_links, "Show links");
-                ui.checkbox(&mut self.view_state.show_backlinks, "Show backlinks");
             });
         self.render_filter(ctx);
         if let Some(next_selection) = self.render_selected(ctx) {
