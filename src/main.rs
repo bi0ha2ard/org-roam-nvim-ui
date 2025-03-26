@@ -1,281 +1,37 @@
+mod history;
+mod graph;
+
 use eframe::egui;
+use graph::{load_graph, Graph, Link, Node, NodeDetails, NodeId};
+use history::History;
 use itertools::Itertools;
 use nalgebra::{Point2, Similarity2, Vector2, clamp};
 use rand::SeedableRng;
-use std::{
-    collections::{HashMap, HashSet},
-    ops::Range,
-};
 
-use serde::{Deserialize, de::IgnoredAny};
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum DBLink {
-    Links(HashMap<String, bool>),
-    Empty(IgnoredAny),
-}
-
-#[derive(Deserialize)]
-struct Database {
-    nodes: HashMap<String, Node>,
-    outbound: HashMap<String, DBLink>,
-    inbound: HashMap<String, DBLink>,
-}
-
-#[derive(Deserialize)]
-struct Node {
-    /// Our internal id, just counted
-    #[serde(skip)]
-    id: usize,
-
-    /// index range into graph.links
-    #[serde(skip)]
-    links: Range<usize>,
-
-    /// index range into graph.links
-    #[serde(skip)]
-    backlinks: Range<usize>,
-
-    tags: Vec<String>,
-    aliases: Vec<String>,
-    #[serde(rename(deserialize = "id"))]
-    uuid: String,
-    level: i32,
-    title: String,
-    mtime: u64,
-}
-
-#[derive(PartialEq)]
-struct Link {
-    from: usize,
-    to: usize,
-}
-
-struct Graph {
-    nodes: Vec<Node>,
-    links: Vec<Link>,     // from -> to, sorted by from
-    backlinks: Vec<Link>, // from -> to, sorted by to
-}
-
-// TODO: reference the &str of the graph object
-struct NodeDetails {
-    node: usize,
-    links: Vec<(usize, String)>,     // target id, target title
-    backlinks: Vec<(usize, String)>, // source id, source title
-}
-
-#[derive(PartialEq)]
-enum DfsDirection {
-    Out,
-    In,
-    Both,
-}
-
-impl DfsDirection {
-    fn allows_out(&self) -> bool {
-        use DfsDirection::*;
-        *self == Out || *self == Both
-    }
-
-    fn allows_in(&self) -> bool {
-        use DfsDirection::*;
-        *self == In || *self == Both
-    }
-}
-
-struct DfsIterator<'a> {
-    graph: &'a Graph,
-    to_visit: Vec<usize>,
-    visited: HashSet<usize>,
-    dir: DfsDirection,
-}
-
-impl<'a> DfsIterator<'a> {
-    fn new(graph: &'a Graph, from: usize, dir: DfsDirection) -> DfsIterator<'a> {
-        DfsIterator {
-            graph,
-            to_visit: vec![from],
-            visited: HashSet::new(),
-            dir,
-        }
-    }
-}
-
-impl<'a> Iterator for DfsIterator<'a> {
-    type Item = &'a Node;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(next) = self.to_visit.pop() {
-            // TODO: allow limiting depth
-            self.visited.insert(next);
-            if self.dir.allows_out() {
-                for nbrs in self.graph.direct_links(next) {
-                    if !self.visited.contains(&nbrs.id) {
-                        self.to_visit.push(nbrs.id);
-                    }
-                }
-            }
-            if self.dir.allows_in() {
-                for nbrs in self.graph.direct_backlinks(next) {
-                    if !self.visited.contains(&nbrs.id) {
-                        self.to_visit.push(nbrs.id);
-                    }
-                }
-            }
-            return Some(self.graph.nodes.get(next).expect("Node should be in graph"));
-        }
-        None
-    }
-}
-
-impl Graph {
-    fn from(db: Database) -> Graph {
-        let mut nodes: Vec<Node> = db.nodes.into_values().collect();
-        for (id, n) in nodes.iter_mut().enumerate() {
-            n.id = id;
-        }
-        let mut tmp = HashMap::<&str, usize>::new();
-        for (id, n) in nodes.iter().enumerate() {
-            tmp.insert(n.uuid.as_str(), id);
-        }
-        let mut links = Vec::new();
-        for (k, v) in db.outbound {
-            match v {
-                DBLink::Empty(_) => {}
-                DBLink::Links(l) => {
-                    for to in l.keys() {
-                        links.push(Link {
-                            from: *tmp.get(k.as_str()).expect("from"),
-                            to: *tmp.get(to.as_str()).expect("to"),
-                        });
-                    }
-                }
-            }
-        }
-        let mut backlinks = Vec::new();
-        for (k, v) in db.inbound {
-            match v {
-                DBLink::Empty(_) => {}
-                DBLink::Links(l) => {
-                    for backlink_source in l.keys() {
-                        backlinks.push(Link {
-                            from: *tmp.get(backlink_source.as_str()).expect("from"),
-                            to: *tmp.get(k.as_str()).expect("to"),
-                        });
-                    }
-                }
-            }
-        }
-        links.sort_by_key(|l| l.from);
-        backlinks.sort_by_key(|l| l.to);
-        {
-            let mut current_idx = 0;
-            let mut last_start = 0;
-            for (idx, n) in links.iter().enumerate() {
-                if n.from != current_idx {
-                    nodes[current_idx].links.start = last_start;
-                    nodes[current_idx].links.end = idx;
-                    last_start = idx;
-                    current_idx = n.from;
-                }
-            }
-            nodes[current_idx].links.start = last_start;
-            nodes[current_idx].links.end = links.len();
-        }
-        {
-            let mut current_idx = 0;
-            let mut last_start = 0;
-            for (idx, n) in backlinks.iter().enumerate() {
-                if n.to != current_idx {
-                    nodes[current_idx].backlinks.start = last_start;
-                    nodes[current_idx].backlinks.end = idx;
-                    last_start = idx;
-                    current_idx = n.to;
-                }
-            }
-            nodes[current_idx].backlinks.start = last_start;
-            nodes[current_idx].backlinks.end = links.len();
-        }
-
-        Graph {
-            nodes,
-            links,
-            backlinks,
-        }
-    }
-
-    fn bfs(&self, id: usize) -> impl Iterator<Item = &Node> {
-        DfsIterator::new(self, id, DfsDirection::Both)
-    }
-
-    fn direct_links(&self, id: usize) -> impl Iterator<Item = &Node> {
-        self.links[self.nodes[id].links.clone()]
-            .iter()
-            .map(|l| self.nodes.get(l.to).unwrap())
-    }
-
-    fn direct_backlinks(&self, id: usize) -> impl Iterator<Item = &Node> {
-        self.backlinks[self.nodes[id].backlinks.clone()]
-            .iter()
-            .map(|l| self.nodes.get(l.from).unwrap())
-    }
-
-    fn is_connected(&self, from: usize, to: usize) -> bool {
-        self.links
-            .iter()
-            .any(|l| (l.from == from && l.to == to) || (l.from == to && l.to == from))
-    }
-
-    fn node_details(&self, node: usize) -> NodeDetails {
-        let to_tuple = |l: &Node| (l.id, l.title.clone());
-        NodeDetails {
-            node,
-            links: self.direct_links(node).map(to_tuple).collect(),
-            backlinks: self.direct_backlinks(node).map(to_tuple).collect(),
-        }
-    }
-
-    fn dot(&self) -> String {
-        let mut res = String::new();
-        res.push_str("digraph {");
-        for n in &self.nodes {
-            res.push_str(&format!("\"{}\";\n", n.title));
-        }
-        for l in &self.links {
-            res.push_str(&format!(
-                "\"{}\" -> \"{}\" [color=blue];\n",
-                self.nodes.get(l.from).unwrap().title,
-                self.nodes.get(l.to).unwrap().title
-            ));
-        }
-        for l in &self.backlinks {
-            res.push_str(&format!(
-                "\"{}\" -> \"{}\" [color=red];\n",
-                self.nodes.get(l.from).unwrap().title,
-                self.nodes.get(l.to).unwrap().title
-            ));
-        }
-        res.push('}');
-        res
-    }
-}
 
 type Point = Point2<f32>;
 type Vector = Vector2<f32>;
 
+#[derive(Default, Eq, PartialEq, PartialOrd, Ord, Copy, Clone, Hash)]
+pub struct SubgNodeId(usize);
+
+pub struct SubgLink {
+    pub from: SubgNodeId,
+    pub to: SubgNodeId,
+}
+
 struct PlacedNode {
     p: Point,  // Location
     f: Vector, // yet to be applied force
-    layout_id: usize,
-    graph_node_id: usize, // keep track of id in case we're filtered down later
+    layout_id: SubgNodeId,
+    graph_node_id: NodeId, // keep track of id in case we're filtered down later
 }
 
 struct GraphLayout {
     // Current positions
     nodes: Vec<PlacedNode>,
-    links: Vec<Link>,
-    backlinks: Vec<Link>,
+    links: Vec<SubgLink>,
+    backlinks: Vec<SubgLink>,
     rng: rand::rngs::StdRng,
     to_screen: Similarity2<f32>,
 }
@@ -291,24 +47,24 @@ impl GraphLayout {
             .map(|(id, n)| PlacedNode {
                 p: Point::origin(),
                 f: Vector::zeros(),
-                layout_id: id,
+                layout_id: SubgNodeId(id),
                 graph_node_id: n.id,
             })
             .collect();
         // TODO: factor out slicing of the graph?
-        let to_subgraph_id = |target: usize| -> Option<usize> {
+        let to_subgraph_id = |target: NodeId| -> Option<SubgNodeId> {
             positioned_nodes
                 .iter()
                 .find_position(|n| n.graph_node_id == target)
-                .map(|(id, _)| id)
+                .map(|(id, _)| SubgNodeId(id))
         };
         let to_subgraph_link =
             |link: &Link| match (to_subgraph_id(link.from), to_subgraph_id(link.to)) {
-                (Some(from), Some(to)) => Some(Link { from, to }),
+                (Some(from), Some(to)) => Some(SubgLink { from, to }),
                 _ => None,
             };
-        let links = graph.links.iter().flat_map(to_subgraph_link).collect();
-        let backlinks = graph.backlinks.iter().flat_map(to_subgraph_link).collect();
+        let links = graph.links().flat_map(to_subgraph_link).collect();
+        let backlinks = graph.backlinks().flat_map(to_subgraph_link).collect();
 
         GraphLayout {
             nodes: positioned_nodes,
@@ -331,23 +87,18 @@ impl GraphLayout {
         }
     }
 
-    fn node_screen_pos(&self, node: usize) -> egui::Pos2 {
-        assert!(
-            self.nodes.get(node).is_some(),
-            "Expected {} in subgraph",
-            node
-        );
+    fn node_screen_pos(&self, SubgNodeId(node): SubgNodeId) -> egui::Pos2 {
         self.pt_to_screen(self.nodes.get(node).expect("node in subgraph").p)
     }
 
     /// Checks connectedness based on sub-graph indices
-    fn is_connected(&self, from: usize, to: usize) -> bool {
+    fn is_connected(&self, from: SubgNodeId, to: SubgNodeId) -> bool {
         self.links
             .iter()
             .any(|l| (l.from == from && l.to == to) || (l.from == to && l.to == from))
     }
 
-    fn by_real_id(&self, actual_id: usize) -> Option<&PlacedNode> {
+    fn by_real_id(&self, actual_id: NodeId) -> Option<&PlacedNode> {
         self.nodes.iter().find(|n| n.graph_node_id == actual_id)
     }
 
@@ -373,7 +124,7 @@ impl GraphLayout {
                 displacement.normalize()
             };
             let clamped_dist = clamp(dist, 0.01, 1e10);
-            let is_connected = self.is_connected(me, other);
+            let is_connected = self.is_connected(SubgNodeId(me), SubgNodeId(other));
             if dist > DIST_FOR_LINKS && is_connected {
                 // Attracting
                 let f = LINK_FORCE_MULT * dt * dir.scale(1. / clamped_dist.min(9.));
@@ -401,17 +152,6 @@ impl GraphLayout {
         }
         skipped == self.nodes.len()
     }
-}
-
-fn load_graph() -> Graph {
-    const DB_FNAME: &str = "db_pretty.json";
-    const ORG_ROAM_SHARE_DIR: &str = ".local/share/nvim/org-roam.nvim";
-    let roam_share_loc = std::path::Path::new(&std::env::var_os("HOME").expect("home"))
-        .join(ORG_ROAM_SHARE_DIR)
-        .join(DB_FNAME);
-    let file = std::fs::File::open(roam_share_loc).expect("Open");
-    let db: Database = serde_json::from_reader(std::io::BufReader::new(file)).expect("Parse");
-    Graph::from(db)
 }
 
 struct GraphViewState {
@@ -451,47 +191,9 @@ struct RoamUI {
     view_state: GraphViewState,
     filter: Filter,
     selected: Option<NodeDetails>,
-    history: History,
+    history: History<NodeId>,
 }
 
-#[derive(Default)]
-struct History {
-    current: Option<usize>,
-    history: Vec<usize>,
-    redo: Vec<usize>,
-}
-
-impl History {
-    fn push(&mut self, next: Option<usize>) {
-        if let Some(curr) = self.current {
-            self.history.push(curr);
-        }
-        self.current = next;
-        self.redo.clear();
-    }
-
-    fn pop(&mut self) -> Option<usize> {
-        if self.history.is_empty() {
-            return self.current;
-        }
-        if let Some(curr) = self.current {
-            self.redo.push(curr);
-        }
-        self.current = self.history.pop();
-        self.current
-    }
-
-    fn unpop(&mut self) -> Option<usize> {
-        if self.redo.is_empty() {
-            return self.current;
-        }
-        if let Some(curr) = self.current {
-            self.history.push(curr);
-        }
-        self.current = self.redo.pop();
-        self.current
-    }
-}
 
 const RADIUS: f32 = 1.0;
 
@@ -499,7 +201,7 @@ impl RoamUI {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // customization here
         let graph = load_graph();
-        let layout = GraphLayout::new(graph.nodes.iter(), &graph, 0);
+        let layout = GraphLayout::new(graph.nodes(), &graph, 0);
         Self {
             graph,
             layout,
@@ -516,7 +218,7 @@ impl RoamUI {
     fn apply_filter(&mut self) {
         let title = self.filter.title.as_str();
         if title.is_empty() {
-            self.layout = GraphLayout::new(self.graph.nodes.iter(), &self.graph, 0);
+            self.layout = GraphLayout::new(self.graph.nodes(), &self.graph, 0);
         } else {
             let case_sensitive = title.chars().any(|c| c.is_uppercase());
             let lower_title = title.to_lowercase();
@@ -529,13 +231,12 @@ impl RoamUI {
             };
             if !self.filter.show_connected {
                 self.layout =
-                    GraphLayout::new(self.graph.nodes.iter().filter(matcher), &self.graph, 0);
+                    GraphLayout::new(self.graph.nodes().filter(matcher), &self.graph, 0);
             } else {
                 // TODO: 2-stage hilighting: direct and connected nodes
                 self.layout = GraphLayout::new(
                     self.graph
-                        .nodes
-                        .iter()
+                        .nodes()
                         .filter(matcher)
                         .flat_map(|n| self.graph.bfs(n.id))
                         .unique_by(|n| n.id),
@@ -582,18 +283,18 @@ impl RoamUI {
                 .pt_to_screen(node.p - Vector::new(0.0, 1.0) * (RADIUS + 0.5))
                 + *offs,
             egui::Align2::CENTER_CENTER,
-            &self.graph.nodes.get(node.graph_node_id).unwrap().title,
+            &self.graph.node(node.graph_node_id).unwrap().title,
             egui::FontId::default(),
             text_color,
         );
     }
 
-    fn render_selected(&self, ctx: &egui::Context) -> Option<usize> {
+    fn render_selected(&self, ctx: &egui::Context) -> Option<NodeId> {
         let Some(details) = &self.selected else {
             return None;
         };
         let mut clicked = None;
-        let node = self.graph.nodes.get(details.node).expect("node exists");
+        let node = self.graph.node(details.node).expect("node exists");
         egui::SidePanel::right("selected")
             .exact_width(200.)
             .show(ctx, |ui| {
@@ -628,7 +329,7 @@ impl RoamUI {
         clicked
     }
 
-    fn select_node(&mut self, node: usize) {
+    fn select_node(&mut self, node: NodeId) {
         self.selected = Some(self.graph.node_details(node));
         self.history.push(Some(node));
     }
@@ -768,7 +469,7 @@ impl RoamUI {
             }
             if ui.ui_contains_pointer() {
                 if let Some(id) = hovered_node {
-                    let graph_node = self.graph.nodes.get(id).unwrap();
+                    let graph_node = self.graph.node(id).unwrap();
                     egui::show_tooltip_at_pointer(
                         ctx,
                         painter.layer_id(),
@@ -827,31 +528,4 @@ fn main() {
         native_options,
         Box::new(|cc| Ok(Box::new(RoamUI::new(cc)))),
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::History;
-
-    #[test]
-    fn pushing() {
-        let mut h = History::default();
-        h.push(Some(1));
-        h.push(Some(2));
-        assert!(matches!(h.current, Some(2)));
-        assert_eq!(h.history, [1]);
-        assert!(h.redo.is_empty());
-
-        let res = h.pop();
-        assert!(matches!(res, Some(1)));
-        assert!(matches!(h.current, Some(1)));
-        assert!(h.history.is_empty());
-        assert_eq!(h.redo, [2]);
-
-        let res = h.unpop();
-        assert!(matches!(res, Some(2)));
-        assert!(matches!(h.current, Some(2)));
-        assert_eq!(h.history, [1]);
-        assert!(h.redo.is_empty());
-    }
 }
