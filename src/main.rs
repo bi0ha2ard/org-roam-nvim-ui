@@ -2,7 +2,10 @@ use eframe::egui;
 use itertools::Itertools;
 use nalgebra::{Point2, Similarity2, Vector2, clamp};
 use rand::SeedableRng;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+};
 
 use serde::{Deserialize, de::IgnoredAny};
 
@@ -22,8 +25,18 @@ struct Database {
 
 #[derive(Deserialize)]
 struct Node {
+    /// Our internal id, just counted
     #[serde(skip)]
     id: usize,
+
+    /// index range into graph.links
+    #[serde(skip)]
+    links: Range<usize>,
+
+    /// index range into graph.links
+    #[serde(skip)]
+    backlinks: Range<usize>,
+
     tags: Vec<String>,
     aliases: Vec<String>,
     #[serde(rename(deserialize = "id"))]
@@ -156,6 +169,35 @@ impl Graph {
         }
         links.sort_by_key(|l| l.from);
         backlinks.sort_by_key(|l| l.to);
+        {
+            let mut current_idx = 0;
+            let mut last_start = 0;
+            for (idx, n) in links.iter().enumerate() {
+                if n.from != current_idx {
+                    nodes[current_idx].links.start = last_start;
+                    nodes[current_idx].links.end = idx;
+                    last_start = idx;
+                    current_idx = n.from;
+                }
+            }
+            nodes[current_idx].links.start = last_start;
+            nodes[current_idx].links.end = links.len();
+        }
+        {
+            let mut current_idx = 0;
+            let mut last_start = 0;
+            for (idx, n) in backlinks.iter().enumerate() {
+                if n.to != current_idx {
+                    nodes[current_idx].backlinks.start = last_start;
+                    nodes[current_idx].backlinks.end = idx;
+                    last_start = idx;
+                    current_idx = n.to;
+                }
+            }
+            nodes[current_idx].backlinks.start = last_start;
+            nodes[current_idx].backlinks.end = links.len();
+        }
+
         Graph {
             nodes,
             links,
@@ -168,18 +210,14 @@ impl Graph {
     }
 
     fn direct_links(&self, id: usize) -> impl Iterator<Item = &Node> {
-        self.links
+        self.links[self.nodes[id].links.clone()]
             .iter()
-            .skip_while(move |l| id != l.from)
-            .take_while(move |l| id == l.from)
             .map(|l| self.nodes.get(l.to).unwrap())
     }
 
     fn direct_backlinks(&self, id: usize) -> impl Iterator<Item = &Node> {
-        self.backlinks
+        self.backlinks[self.nodes[id].backlinks.clone()]
             .iter()
-            .skip_while(move |l| id != l.to)
-            .take_while(move |l| id == l.to)
             .map(|l| self.nodes.get(l.from).unwrap())
     }
 
@@ -450,7 +488,6 @@ impl History {
         self.current
     }
 }
-
 
 const RADIUS: f32 = 1.0;
 
