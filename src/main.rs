@@ -1,13 +1,12 @@
-mod history;
 mod graph;
+mod history;
 
 use eframe::egui;
-use graph::{load_graph, Graph, Link, Node, NodeDetails, NodeId};
+use graph::{Graph, Link, Node, NodeDetails, NodeId, load_graph};
 use history::History;
 use itertools::Itertools;
 use nalgebra::{Point2, Similarity2, Vector2, clamp};
 use rand::SeedableRng;
-
 
 type Point = Point2<f32>;
 type Vector = Vector2<f32>;
@@ -188,12 +187,12 @@ struct Filter {
 struct RoamUI {
     graph: Graph,
     layout: GraphLayout,
+    history: History<NodeId>,
     view_state: GraphViewState,
     filter: Filter,
     selected: Option<NodeDetails>,
-    history: History<NodeId>,
+    highlighted: Option<NodeId>,
 }
-
 
 const RADIUS: f32 = 1.0;
 
@@ -205,13 +204,14 @@ impl RoamUI {
         Self {
             graph,
             layout,
+            history: History::default(),
             view_state: GraphViewState::default(),
             filter: Filter {
                 title: String::new(),
                 show_connected: true,
             },
             selected: None,
-            history: History::default(),
+            highlighted: None,
         }
     }
 
@@ -230,8 +230,7 @@ impl RoamUI {
                 }
             };
             if !self.filter.show_connected {
-                self.layout =
-                    GraphLayout::new(self.graph.nodes().filter(matcher), &self.graph, 0);
+                self.layout = GraphLayout::new(self.graph.nodes().filter(matcher), &self.graph, 0);
             } else {
                 // TODO: 2-stage hilighting: direct and connected nodes
                 self.layout = GraphLayout::new(
@@ -289,12 +288,27 @@ impl RoamUI {
         );
     }
 
-    fn render_selected(&self, ctx: &egui::Context) -> Option<NodeId> {
+    fn render_selected(&self, ctx: &egui::Context) -> (Option<NodeId>, Option<NodeId>) {
         let Some(details) = &self.selected else {
-            return None;
+            return (None, self.highlighted);
         };
         let mut clicked = None;
+        let mut highlighted = None;
         let node = self.graph.node(details.node).expect("node exists");
+
+        let mut render_link = |ui: &mut egui::Ui, (id, text): &(NodeId, String)| {
+            let mut l = ui.label(text);
+            if matches!(self.highlighted, Some(hl_id) if hl_id == *id) {
+                l = l.highlight();
+            }
+            if l.clicked() {
+                clicked = Some(*id);
+            }
+            if l.contains_pointer() {
+                highlighted = Some(*id);
+            }
+        };
+
         egui::SidePanel::right("selected")
             .exact_width(200.)
             .show(ctx, |ui| {
@@ -311,22 +325,18 @@ impl RoamUI {
                         // ));
                         // ui.separator();
                         ui.label("Links");
-                        for (id, text) in &details.links {
-                            if ui.label(text).clicked() {
-                                clicked = Some(*id);
-                            }
+                        for l in &details.links {
+                            render_link(ui, l);
                         }
                         ui.separator();
                         ui.label("Backlinks");
-                        for (id, text) in &details.backlinks {
-                            if ui.label(text).clicked() {
-                                clicked = Some(*id);
-                            }
+                        for l in &details.backlinks {
+                            render_link(ui, l);
                         }
                     })
                 });
             });
-        clicked
+        (clicked, highlighted)
     }
 
     fn select_node(&mut self, node: NodeId) {
@@ -442,7 +452,7 @@ impl RoamUI {
                 painter.circle_filled(
                     pos,
                     radius_screen,
-                    if mouse_over {
+                    if mouse_over || matches!(&self.highlighted, Some(id) if *id == n.graph_node_id) {
                         egui::Color32::BLUE
                     } else if matches!(&self.selected.as_ref().map(|n|n.node), Some(id) if *id == n.graph_node_id) {
                         egui::Color32::ORANGE
@@ -452,6 +462,7 @@ impl RoamUI {
                 );
                 if mouse_over {
                     hovered_node = Some(n.graph_node_id);
+                    self.highlighted = hovered_node;
                 }
             }
             if clicked && hovered_node.map(|n| self.select_node(n)).is_none() {
@@ -513,9 +524,11 @@ impl eframe::App for RoamUI {
                 }
             });
         self.render_filter(ctx);
-        if let Some(next_selection) = self.render_selected(ctx) {
+        let (next_sel, next_hl) = self.render_selected(ctx);
+        if let Some(next_selection) = next_sel {
             self.select_node(next_selection);
         }
+        self.highlighted = next_hl;
         self.render_graph(ctx);
         ctx.input(|i| self.handle_global_shortcuts(i));
     }
