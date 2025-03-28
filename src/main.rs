@@ -298,14 +298,15 @@ impl RoamUI {
 
         let mut render_link = |ui: &mut egui::Ui, (id, text): &(NodeId, String)| {
             let mut l = ui.label(text);
-            if matches!(self.highlighted, Some(hl_id) if hl_id == *id) {
+            let contains_pointer = l.contains_pointer();
+            if contains_pointer {
+                highlighted = Some(*id);
+            }
+            if contains_pointer || matches!(self.highlighted, Some(hl_id) if hl_id == *id) {
                 l = l.highlight();
             }
             if l.clicked() {
                 clicked = Some(*id);
-            }
-            if l.contains_pointer() {
-                highlighted = Some(*id);
             }
         };
 
@@ -538,11 +539,11 @@ impl eframe::App for RoamUI {
                     }
                 }
             });
-        self.render_filter(ctx);
         let (next_sel, next_hl) = self.render_selected(ctx);
         if let Some(next_selection) = next_sel {
             self.select_node(next_selection);
         }
+        self.render_filter(ctx);
         self.highlighted = next_hl;
         self.render_graph(ctx);
         ctx.input(|i| self.handle_global_shortcuts(i));
