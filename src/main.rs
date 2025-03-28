@@ -315,7 +315,22 @@ impl RoamUI {
                 ui.horizontal_wrapped(|ui| {
                     ui.vertical_centered(|ui| {
                         ui.label(&node.title);
+                        for alias in &node.aliases {
+                            ui.label(format!("(alias {})", alias));
+                        }
                         ui.separator();
+                        if !node.tags.is_empty() {
+                            ui.horizontal_wrapped(|inner| {
+                                inner.label("Tags:");
+                                for (n, t) in node.tags.iter().enumerate() {
+                                    if n > 0 {
+                                        inner.separator();
+                                    }
+                                    inner.label(t);
+                                }
+                            });
+                            ui.separator();
+                        }
                         // ui.label(format!(
                         //     "ID: {}, UUID: {}, links: {}, backlinks: {}",
                         //     node.id,
