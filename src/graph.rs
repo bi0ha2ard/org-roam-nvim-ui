@@ -12,11 +12,19 @@ enum DBLink {
     Empty(IgnoredAny),
 }
 
+type NestedHash = HashMap<String, HashMap<String, bool>>;
+
+#[derive(Deserialize)]
+struct Indexes {
+    tag: NestedHash
+}
+
 #[derive(Deserialize)]
 struct Database {
     nodes: HashMap<String, Node>,
     outbound: HashMap<String, DBLink>,
     inbound: HashMap<String, DBLink>,
+    indexes: Indexes,
 }
 
 #[derive(Default, Eq, PartialEq, PartialOrd, Ord, Copy, Clone, Hash)]
@@ -55,6 +63,43 @@ pub struct Graph {
     nodes: Vec<Node>,
     links: Vec<Link>,     // from -> to, sorted by from
     backlinks: Vec<Link>, // from -> to, sorted by to
+    pub tags: MultiMap    // tag  -> Node range
+}
+
+pub struct MultiMap {
+    table: HashMap<String, Range<usize>>,
+    data: Vec<NodeId>
+}
+
+impl MultiMap {
+    pub fn node_ids_for(&self, tag: &str) -> impl Iterator<Item = &NodeId> {
+        self.data[self.table.get(tag).cloned().unwrap_or(0..0)].iter()
+    }
+
+    pub fn all_tags(&self) -> impl Iterator<Item = (&str, impl Iterator<Item = &NodeId>)> {
+        self.table.iter().map(|(k, v)| (k.as_str(), self.data[v.clone()].iter()))
+    }
+}
+
+fn nested_hash_to_multimap(nested: &NestedHash, nodes: &[Node]) -> MultiMap {
+    let mut node_to_id = HashMap::new();
+    for n in nodes {
+        node_to_id.insert(n.uuid.as_str(), n.id);
+    }
+
+    let mut data = Vec::new();
+    let mut table = HashMap::new();
+
+    let mut from = 0;
+    for (k, v) in nested {
+        for node_uuid in v.keys() {
+            data.push(*node_to_id.get(node_uuid.as_str()).expect("Broken index"));
+        }
+        table.insert(k.clone(), from..data.len());
+        from = data.len();
+    }
+
+    MultiMap{table, data}
 }
 
 // TODO: reference the &str of the graph object
@@ -197,15 +242,22 @@ impl Graph {
             nodes[current_idx.0].backlinks.end = links.len();
         }
 
+        let tags = nested_hash_to_multimap(&db.indexes.tag, &nodes);
+
         Graph {
             nodes,
             links,
             backlinks,
+            tags
         }
     }
 
     pub fn nodes(&self) -> impl Iterator<Item = &Node> {
         self.nodes.iter()
+    }
+
+    pub fn nodes_for(&self, tag: &str) -> impl Iterator<Item = &Node> {
+        self.tags.node_ids_for(tag).map(|n| &self.nodes[n.0])
     }
 
     pub fn links(&self) -> impl Iterator<Item = &Link> {
@@ -277,7 +329,7 @@ impl Graph {
 }
 
 pub fn load_graph() -> Graph {
-    const DB_FNAME: &str = "db_pretty.json";
+    const DB_FNAME: &str = "db";
     const ORG_ROAM_SHARE_DIR: &str = ".local/share/nvim/org-roam.nvim";
     let roam_share_loc = std::path::Path::new(&std::env::var_os("HOME").expect("home"))
         .join(ORG_ROAM_SHARE_DIR)

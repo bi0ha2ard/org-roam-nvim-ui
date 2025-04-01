@@ -192,6 +192,7 @@ struct RoamUI {
     filter: Filter,
     selected: Option<NodeDetails>,
     highlighted: Option<NodeId>,
+    additional_highlighted: Vec<NodeId> // TODO: HashSet may or may not be faster, but n is small
 }
 
 const RADIUS: f32 = 1.0;
@@ -212,6 +213,7 @@ impl RoamUI {
             },
             selected: None,
             highlighted: None,
+            additional_highlighted: Vec::new()
         }
     }
 
@@ -270,6 +272,16 @@ impl RoamUI {
             });
     }
 
+    fn render_tags(&mut self, ui: &mut egui::Ui) {
+        self.additional_highlighted.clear();
+        for (k, inner) in self.graph.tags.all_tags() {
+            let r = ui.label(format!("{}: {} nodes", k, inner.try_len().unwrap_or(0)));
+            if r.contains_pointer() {
+                self.additional_highlighted = inner.cloned().collect();
+            }
+        }
+    }
+
     fn node_title_in_graph(
         &self,
         painter: &egui::Painter,
@@ -288,10 +300,11 @@ impl RoamUI {
         );
     }
 
-    fn render_selected(&self, ctx: &egui::Context) -> (Option<NodeId>, Option<NodeId>) {
+    fn render_selected(&self, ctx: &egui::Context) -> (Option<NodeId>, Option<NodeId>, Option<String>) {
         let Some(details) = &self.selected else {
-            return (None, self.highlighted);
+            return (None, self.highlighted, None);
         };
+        let mut selected_tag = None;
         let mut clicked = None;
         let mut highlighted = None;
         let node = self.graph.node(details.node).expect("node exists");
@@ -327,7 +340,10 @@ impl RoamUI {
                                     if n > 0 {
                                         inner.separator();
                                     }
-                                    inner.label(t);
+                                    let r = inner.label(t);
+                                    if r.contains_pointer() {
+                                        selected_tag = Some(t.clone());
+                                    }
                                 }
                             });
                             ui.separator();
@@ -352,7 +368,7 @@ impl RoamUI {
                     })
                 });
             });
-        (clicked, highlighted)
+        (clicked, highlighted, selected_tag)
     }
 
     fn select_node(&mut self, node: NodeId) {
@@ -472,6 +488,8 @@ impl RoamUI {
                         egui::Color32::BLUE
                     } else if matches!(&self.selected.as_ref().map(|n|n.node), Some(id) if *id == n.graph_node_id) {
                         egui::Color32::ORANGE
+                    } else if self.additional_highlighted.contains(&n.graph_node_id) {
+                        egui::Color32::CYAN
                     } else {
                         egui::Color32::RED
                     },
@@ -538,10 +556,15 @@ impl eframe::App for RoamUI {
                         n.p = Point::origin();
                     }
                 }
+                ui.separator();
+                ui.vertical(|ui| self.render_tags(ui));
             });
-        let (next_sel, next_hl) = self.render_selected(ctx);
+        let (next_sel, next_hl, sel_tag) = self.render_selected(ctx);
         if let Some(next_selection) = next_sel {
             self.select_node(next_selection);
+        }
+        if let Some(sel_tag) = sel_tag {
+            self.additional_highlighted = self.graph.tags.node_ids_for(sel_tag.as_str()).cloned().collect();
         }
         self.render_filter(ctx);
         self.highlighted = next_hl;
