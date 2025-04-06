@@ -1,6 +1,8 @@
 mod graph;
 mod history;
 
+use std::fmt::Display;
+
 use eframe::egui;
 use graph::{Graph, Link, Node, NodeDetails, NodeId, load_graph};
 use history::History;
@@ -184,6 +186,116 @@ struct Filter {
     show_connected: bool,
 }
 
+#[derive(Copy, Clone, PartialEq)]
+enum TagFilterState {
+    Include,
+    Exclusive,
+    Exclude,
+}
+
+impl TagFilterState {
+    fn next(&self) -> Self {
+        use TagFilterState::*;
+        match self {
+            Include => Exclusive,
+            Exclusive => Exclude,
+            Exclude => Include,
+        }
+    }
+}
+
+impl Display for TagFilterState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TagFilterState::Exclude => f.write_str("x"),
+            TagFilterState::Include => f.write_str(" "),
+            TagFilterState::Exclusive => f.write_str("i"),
+        }
+    }
+}
+
+struct TagFilter {
+    text_filter: String,
+    states: Vec<(String, TagFilterState)>,
+}
+
+impl TagFilter {
+    fn build_filter<'a>(&'a self) -> Box<dyn Fn(&Node) -> bool + 'a> {
+        use TagFilterState::*;
+        {
+            let exclusive_tags: Vec<&str> = self
+                .states
+                .iter()
+                .filter(|(_, s)| *s == Exclusive)
+                .map(|(s, _)| s.as_str())
+                .collect();
+            if !exclusive_tags.is_empty() {
+                return Box::new(move |n: &Node| -> bool {
+                    !n.tags.is_empty()
+                        && n.tags.iter().any(|t| exclusive_tags.contains(&t.as_str()))
+                });
+            }
+        }
+        {
+            let excluded_tags: Vec<&str> = self
+                .states
+                .iter()
+                .filter(|(_, s)| *s == Exclude)
+                .map(|(s, _)| s.as_str())
+                .collect();
+            Box::new(move |n: &Node| -> bool {
+                !n.tags.is_empty() || n.tags.iter().all(|t| !excluded_tags.contains(&t.as_str()))
+            })
+        }
+    }
+}
+
+fn tag_selector<'a>(ui: &mut egui::Ui, state: &'a mut TagFilter) -> (bool, Option<&'a str>) {
+    ui.horizontal(|ui| {
+        let tag_label = ui.label("Tags");
+        ui.add(egui::TextEdit::singleline(&mut state.text_filter))
+            .labelled_by(tag_label.id);
+    });
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        if ui.button("r").clicked() {
+            for (_, s) in &mut state.states {
+                *s = TagFilterState::Include;
+            }
+            changed = true;
+        }
+        if ui.button("x").clicked() {
+            for (_, s) in &mut state.states {
+                *s = TagFilterState::Exclude;
+            }
+            changed = true;
+        }
+        if ui.button("i").clicked() {
+            for (_, s) in &mut state.states {
+                *s = TagFilterState::Exclusive;
+            }
+            changed = true;
+        }
+    });
+    let must_filter = !state.text_filter.is_empty();
+    let filter_pat = state.text_filter.to_lowercase();
+    let mut res: Option<&str> = None;
+    for (name, state) in &mut state.states {
+        if !must_filter || name.to_lowercase().contains(&filter_pat) {
+            let r = ui.label(format!("{} {}", name, state));
+            if r.clicked() {
+                *state = state.next();
+                changed = true;
+            }
+            if r.contains_pointer() {
+                res = Some(name);
+            }
+        }
+    }
+
+    (changed, res)
+}
+
 struct RoamUI {
     graph: Graph,
     layout: GraphLayout,
@@ -192,7 +304,8 @@ struct RoamUI {
     filter: Filter,
     selected: Option<NodeDetails>,
     highlighted: Option<NodeId>,
-    additional_highlighted: Vec<NodeId> // TODO: HashSet may or may not be faster, but n is small
+    additional_highlighted: Vec<NodeId>, // TODO: HashSet may or may not be faster, but n is small
+    tag_state: TagFilter,
 }
 
 const RADIUS: f32 = 1.0;
@@ -202,6 +315,11 @@ impl RoamUI {
         // customization here
         let graph = load_graph();
         let layout = GraphLayout::new(graph.nodes(), &graph, 0);
+        let tag_states = graph
+            .tags
+            .all_tags()
+            .map(|(t, _)| (t.to_string(), TagFilterState::Include))
+            .collect();
         Self {
             graph,
             layout,
@@ -213,22 +331,30 @@ impl RoamUI {
             },
             selected: None,
             highlighted: None,
-            additional_highlighted: Vec::new()
+            additional_highlighted: Vec::new(),
+            tag_state: TagFilter {
+                text_filter: String::default(),
+                states: tag_states,
+            },
         }
     }
 
     fn apply_filter(&mut self) {
         let title = self.filter.title.as_str();
+        let tag_filter = self.tag_state.build_filter();
         if title.is_empty() {
-            self.layout = GraphLayout::new(self.graph.nodes(), &self.graph, 0);
+            self.layout =
+                GraphLayout::new(self.graph.nodes().filter(|n| tag_filter(n)), &self.graph, 0);
         } else {
             let case_sensitive = title.chars().any(|c| c.is_uppercase());
             let lower_title = title.to_lowercase();
             let matcher = |n: &&Node| {
-                if case_sensitive {
-                    n.title.contains(title)
-                } else {
-                    n.title.to_lowercase().contains(lower_title.as_str())
+                tag_filter(n) && {
+                    if case_sensitive {
+                        n.title.contains(title)
+                    } else {
+                        n.title.to_lowercase().contains(lower_title.as_str())
+                    }
                 }
             };
             if !self.filter.show_connected {
@@ -248,38 +374,23 @@ impl RoamUI {
         }
     }
 
-    fn render_filter(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("filter")
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.label("Filter");
-                    let was_empty = self.filter.title.is_empty();
-                    let title_changed = ui
-                        .add(egui::TextEdit::singleline(&mut self.filter.title))
-                        .changed();
-                    let checkbox_changed = ui
-                        .checkbox(&mut self.filter.show_connected, "include connected nodes")
-                        .changed();
-                    if was_empty && self.filter.title.is_empty() {
-                        // Prevent re-render if filter hasn't changed
-                        return;
-                    }
-                    if title_changed || checkbox_changed {
-                        self.apply_filter();
-                    }
-                });
-            });
-    }
-
-    fn render_tags(&mut self, ui: &mut egui::Ui) {
-        self.additional_highlighted.clear();
-        for (k, inner) in self.graph.tags.all_tags() {
-            let r = ui.label(format!("{}: {} nodes", k, inner.try_len().unwrap_or(0)));
-            if r.contains_pointer() {
-                self.additional_highlighted = inner.cloned().collect();
-            }
+    fn node_title_filter_changed(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut changed = false;
+        let was_empty = self.filter.title.is_empty();
+        ui.horizontal(|ui| {
+            ui.label("Nodes");
+            changed = ui
+                .add(egui::TextEdit::singleline(&mut self.filter.title))
+                .changed();
+        });
+        let checkbox_changed = ui
+            .checkbox(&mut self.filter.show_connected, "include connected nodes")
+            .changed();
+        if was_empty && self.filter.title.is_empty() {
+            // Prevent re-render if filter hasn't changed
+            return false;
         }
+        changed || checkbox_changed
     }
 
     fn node_title_in_graph(
@@ -300,7 +411,10 @@ impl RoamUI {
         );
     }
 
-    fn render_selected(&self, ctx: &egui::Context) -> (Option<NodeId>, Option<NodeId>, Option<String>) {
+    fn render_selected(
+        &self,
+        ctx: &egui::Context,
+    ) -> (Option<NodeId>, Option<NodeId>, Option<String>) {
         let Some(details) = &self.selected else {
             return (None, self.highlighted, None);
         };
@@ -532,6 +646,24 @@ impl RoamUI {
             }
         });
     }
+
+    fn graph_settings(&mut self, ui: &mut egui::Ui) {
+        ui.label("Layout Settings");
+        ui.add(egui::Slider::new(&mut self.view_state.dt, 0.001_f32..=5.));
+        ui.add(egui::Slider::new(
+            &mut self.view_state.force_max,
+            1_f32..=10.,
+        ));
+        ui.add(egui::Slider::new(
+            &mut self.view_state.force_min,
+            0_f32..=1.,
+        ));
+        if ui.button("Reset").clicked() {
+            for n in &mut self.layout.nodes {
+                n.p = Point::origin();
+            }
+        }
+    }
 }
 
 impl eframe::App for RoamUI {
@@ -539,35 +671,45 @@ impl eframe::App for RoamUI {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Q)) {
             ctx.send_viewport_cmd(egui::viewport::ViewportCommand::Close);
         }
+        let mut tag_filter_changed = false;
+        let mut title_filter_changed = false;
         egui::SidePanel::left("Graph Settings")
             .resizable(false)
             .show(ctx, |ui| {
-                ui.add(egui::Slider::new(&mut self.view_state.dt, 0.001_f32..=5.));
-                ui.add(egui::Slider::new(
-                    &mut self.view_state.force_max,
-                    1_f32..=10.,
-                ));
-                ui.add(egui::Slider::new(
-                    &mut self.view_state.force_min,
-                    0_f32..=1.,
-                ));
-                if ui.button("Reset").clicked() {
-                    for n in &mut self.layout.nodes {
-                        n.p = Point::origin();
-                    }
-                }
+                ui.label("Filters");
                 ui.separator();
-                ui.vertical(|ui| self.render_tags(ui));
+                title_filter_changed = self.node_title_filter_changed(ui);
+                ui.separator();
+                ui.vertical(|ui| {
+                    self.additional_highlighted.clear();
+                    let (changed, next_hover) = tag_selector(ui, &mut self.tag_state);
+                    tag_filter_changed = changed;
+                    if let Some(hovered) = next_hover {
+                        self.additional_highlighted =
+                            self.graph.tags.node_ids_for(hovered).cloned().collect();
+                    }
+                });
+                ui.separator();
+                self.graph_settings(ui);
             });
         let (next_sel, next_hl, sel_tag) = self.render_selected(ctx);
         if let Some(next_selection) = next_sel {
             self.select_node(next_selection);
         }
         if let Some(sel_tag) = sel_tag {
-            self.additional_highlighted = self.graph.tags.node_ids_for(sel_tag.as_str()).cloned().collect();
+            self.additional_highlighted = self
+                .graph
+                .tags
+                .node_ids_for(sel_tag.as_str())
+                .cloned()
+                .collect();
         }
-        self.render_filter(ctx);
+        if tag_filter_changed || title_filter_changed {
+            self.apply_filter();
+        }
+
         self.highlighted = next_hl;
+
         self.render_graph(ctx);
         ctx.input(|i| self.handle_global_shortcuts(i));
     }
