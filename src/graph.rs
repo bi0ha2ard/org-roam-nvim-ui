@@ -12,11 +12,18 @@ enum DBLink {
     Empty(IgnoredAny),
 }
 
-type NestedHash = HashMap<String, HashMap<String, bool>>;
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum HashOrEmpty {
+    Hash(HashMap<String, bool>),
+    Empty([bool; 0]), // if some tag goes away, aparantly the entry becomes "tag": []
+}
+
+type NestedHash = HashMap<String, HashOrEmpty>;
 
 #[derive(Deserialize)]
 struct Indexes {
-    tag: NestedHash
+    tag: NestedHash,
 }
 
 #[derive(Deserialize)]
@@ -63,12 +70,12 @@ pub struct Graph {
     nodes: Vec<Node>,
     links: Vec<Link>,     // from -> to, sorted by from
     backlinks: Vec<Link>, // from -> to, sorted by to
-    pub tags: MultiMap    // tag  -> Node range
+    pub tags: MultiMap,   // tag  -> Node range
 }
 
 pub struct MultiMap {
     table: HashMap<String, Range<usize>>,
-    data: Vec<NodeId>
+    data: Vec<NodeId>,
 }
 
 impl MultiMap {
@@ -77,7 +84,9 @@ impl MultiMap {
     }
 
     pub fn all_tags(&self) -> impl Iterator<Item = (&str, impl Iterator<Item = &NodeId>)> {
-        self.table.iter().map(|(k, v)| (k.as_str(), self.data[v.clone()].iter()))
+        self.table
+            .iter()
+            .map(|(k, v)| (k.as_str(), self.data[v.clone()].iter()))
     }
 }
 
@@ -92,14 +101,19 @@ fn nested_hash_to_multimap(nested: &NestedHash, nodes: &[Node]) -> MultiMap {
 
     let mut from = 0;
     for (k, v) in nested {
-        for node_uuid in v.keys() {
-            data.push(*node_to_id.get(node_uuid.as_str()).expect("Broken index"));
+        match v {
+            HashOrEmpty::Hash(inner) => {
+                for node_uuid in inner.keys() {
+                    data.push(*node_to_id.get(node_uuid.as_str()).expect("Broken index"));
+                }
+                table.insert(k.clone(), from..data.len());
+                from = data.len();
+            }
+            HashOrEmpty::Empty(_) => {}
         }
-        table.insert(k.clone(), from..data.len());
-        from = data.len();
     }
 
-    MultiMap{table, data}
+    MultiMap { table, data }
 }
 
 // TODO: reference the &str of the graph object
@@ -248,7 +262,7 @@ impl Graph {
             nodes,
             links,
             backlinks,
-            tags
+            tags,
         }
     }
 
@@ -330,6 +344,7 @@ impl Graph {
 
 pub fn load_graph() -> Graph {
     const DB_FNAME: &str = "db";
+    // const DB_FNAME: &str = "db_pretty.json";
     const ORG_ROAM_SHARE_DIR: &str = ".local/share/nvim/org-roam.nvim";
     let roam_share_loc = std::path::Path::new(&std::env::var_os("HOME").expect("home"))
         .join(ORG_ROAM_SHARE_DIR)
@@ -338,4 +353,3 @@ pub fn load_graph() -> Graph {
     let db: Database = serde_json::from_reader(std::io::BufReader::new(file)).expect("Parse");
     Graph::from(db)
 }
-
