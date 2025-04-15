@@ -275,6 +275,10 @@ impl Graph {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
     pub fn nodes(&self) -> impl Iterator<Item = &Node> {
         self.nodes.iter()
     }

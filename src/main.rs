@@ -182,9 +182,68 @@ impl GraphViewState {
 }
 
 struct Filter {
-    title: String,
+    node_title: String,
+    tag_state: TagFilter,
+
     show_connected: bool,
     max_nbrs: usize,
+}
+
+impl Filter {
+    fn from_graph(graph: &Graph) -> Self {
+        let tag_states = graph
+            .tags
+            .all_tags()
+            .map(|(t, _)| (t.to_string(), TagFilterState::Include))
+            .collect();
+        Self {
+            node_title: String::new(),
+            tag_state: TagFilter {
+                text_filter: String::default(),
+                states: tag_states,
+            },
+            show_connected: true,
+            max_nbrs: 20,
+        }
+    }
+
+    fn apply_to(&self, graph: &Graph) -> GraphLayout {
+        let title = self.node_title.as_str();
+        let tag_filter = self.tag_state.build_filter();
+        if title.is_empty() {
+            if !self.tag_state.is_active() {
+                return GraphLayout::new(graph.nodes(), graph, 0);
+            }
+            return GraphLayout::new(graph.nodes().filter(|n| tag_filter(n)), graph, 0);
+        }
+        let case_sensitive = title.chars().any(|c| c.is_uppercase());
+        let lower_title = title.to_lowercase();
+        let matcher = |n: &&Node| {
+            tag_filter(n) && {
+                if case_sensitive {
+                    n.title.contains(title)
+                } else {
+                    n.title.to_lowercase().contains(lower_title.as_str())
+                }
+            }
+        };
+        if !self.show_connected || self.max_nbrs == 0 {
+            GraphLayout::new(graph.nodes().filter(matcher), graph, 0)
+        } else {
+            // TODO: 2-stage hilighting: direct and connected nodes
+            // TODO: Should tag filtering also apply here? If we set something to excluded, it
+            // should probably be hidden here too.
+            GraphLayout::new(
+                graph
+                    .nodes()
+                    .filter(matcher)
+                    .flat_map(|n| graph.dfs_limited(n.id, self.max_nbrs))
+                    .unique_by(|n| n.id),
+                graph,
+                0,
+            )
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -216,11 +275,18 @@ impl Display for TagFilterState {
 }
 
 struct TagFilter {
+    /// UI only, visually filter tag list
     text_filter: String,
     states: Vec<(String, TagFilterState)>,
 }
 
 impl TagFilter {
+    fn is_active(&self) -> bool {
+        self.states
+            .iter()
+            .any(|(_, state)| *state != TagFilterState::Include)
+    }
+
     fn build_filter<'a>(&'a self) -> Box<dyn Fn(&Node) -> bool + 'a> {
         use TagFilterState::*;
         {
@@ -245,56 +311,90 @@ impl TagFilter {
                 .map(|(s, _)| s.as_str())
                 .collect();
             Box::new(move |n: &Node| -> bool {
-                !n.tags.is_empty() || n.tags.iter().all(|t| !excluded_tags.contains(&t.as_str()))
+                n.tags.is_empty() || n.tags.iter().all(|t| !excluded_tags.contains(&t.as_str()))
             })
         }
     }
 }
 
-fn tag_selector<'a>(ui: &mut egui::Ui, state: &'a mut TagFilter) -> (bool, Option<&'a str>) {
-    ui.horizontal(|ui| {
-        let tag_label = ui.label("Tags");
-        ui.add(egui::TextEdit::singleline(&mut state.text_filter))
-            .labelled_by(tag_label.id);
-    });
-    let mut changed = false;
-    ui.horizontal(|ui| {
-        if ui.button("r").clicked() {
-            for (_, s) in &mut state.states {
-                *s = TagFilterState::Include;
-            }
-            changed = true;
-        }
-        if ui.button("x").clicked() {
-            for (_, s) in &mut state.states {
-                *s = TagFilterState::Exclude;
-            }
-            changed = true;
-        }
-        if ui.button("i").clicked() {
-            for (_, s) in &mut state.states {
-                *s = TagFilterState::Exclusive;
-            }
-            changed = true;
-        }
-    });
-    let must_filter = !state.text_filter.is_empty();
-    let filter_pat = state.text_filter.to_lowercase();
-    let mut res: Option<&str> = None;
-    for (name, state) in &mut state.states {
-        if !must_filter || name.to_lowercase().contains(&filter_pat) {
-            let r = ui.label(format!("{} {}", name, state));
-            if r.clicked() {
-                *state = state.next();
+struct FilterResponse<'a> {
+    changed: bool,
+    hovered_tag: Option<&'a str>,
+}
+
+fn filter_ui<'a>(ui: &mut egui::Ui, filter: &'a mut Filter) -> FilterResponse<'a> {
+    let title_changed = {
+        ui.label("Title must include:");
+        ui.add(egui::TextEdit::singleline(&mut filter.node_title))
+            .changed()
+    };
+    ui.separator();
+
+    let (tag_changed, hovered_tag) = {
+        let state = &mut filter.tag_state;
+        ui.horizontal(|ui| {
+            let tag_label = ui.label("Tags");
+            ui.add(egui::TextEdit::singleline(&mut state.text_filter))
+                .labelled_by(tag_label.id);
+        });
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            if ui.button("r").clicked() {
+                for (_, s) in &mut state.states {
+                    *s = TagFilterState::Include;
+                }
                 changed = true;
             }
-            if r.contains_pointer() {
-                res = Some(name);
+            if ui.button("x").clicked() {
+                for (_, s) in &mut state.states {
+                    *s = TagFilterState::Exclude;
+                }
+                changed = true;
+            }
+            if ui.button("i").clicked() {
+                for (_, s) in &mut state.states {
+                    *s = TagFilterState::Exclusive;
+                }
+                changed = true;
+            }
+        });
+        let must_filter = !state.text_filter.is_empty();
+        let filter_pat = state.text_filter.to_lowercase();
+        let mut res: Option<&str> = None;
+        for (name, state) in &mut state.states {
+            if !must_filter || name.to_lowercase().contains(&filter_pat) {
+                let r = ui.label(format!("{} {}", name, state));
+                if r.clicked() {
+                    *state = state.next();
+                    changed = true;
+                }
+                if r.contains_pointer() {
+                    res = Some(name);
+                }
             }
         }
-    }
 
-    (changed, res)
+        (changed, res)
+    };
+    ui.separator();
+    // If both of the others are false, this has no effect
+    let nbrs_changed = {
+        let checkbox_changed = ui
+            .checkbox(&mut filter.show_connected, "include connected nodes")
+            .changed();
+        ui.label("Limit to");
+        let depth_changed = ui
+            .add(
+                egui::Slider::new(&mut filter.max_nbrs, 0_usize..=20)
+                    .clamping(egui::SliderClamping::Never),
+            )
+            .changed();
+        checkbox_changed || depth_changed
+    };
+    FilterResponse {
+        changed: nbrs_changed || tag_changed || title_changed,
+        hovered_tag,
+    }
 }
 
 struct RoamUI {
@@ -306,7 +406,6 @@ struct RoamUI {
     selected: Option<NodeDetails>,
     highlighted: Option<NodeId>,
     additional_highlighted: Vec<NodeId>, // TODO: HashSet may or may not be faster, but n is small
-    tag_state: TagFilter,
 }
 
 const RADIUS: f32 = 1.0;
@@ -315,86 +414,22 @@ impl RoamUI {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // customization here
         let graph = load_graph();
-        let layout = GraphLayout::new(graph.nodes(), &graph, 0);
-        let tag_states = graph
-            .tags
-            .all_tags()
-            .map(|(t, _)| (t.to_string(), TagFilterState::Include))
-            .collect();
+        let filter = Filter::from_graph(&graph);
+        let layout = filter.apply_to(&graph);
         Self {
             graph,
             layout,
             history: History::default(),
             view_state: GraphViewState::default(),
-            filter: Filter {
-                title: String::new(),
-                show_connected: true,
-                max_nbrs: 20
-            },
+            filter,
             selected: None,
             highlighted: None,
             additional_highlighted: Vec::new(),
-            tag_state: TagFilter {
-                text_filter: String::default(),
-                states: tag_states,
-            },
         }
     }
 
     fn apply_filter(&mut self) {
-        let title = self.filter.title.as_str();
-        let tag_filter = self.tag_state.build_filter();
-        if title.is_empty() {
-            self.layout =
-                GraphLayout::new(self.graph.nodes().filter(|n| tag_filter(n)), &self.graph, 0);
-        } else {
-            let case_sensitive = title.chars().any(|c| c.is_uppercase());
-            let lower_title = title.to_lowercase();
-            let matcher = |n: &&Node| {
-                tag_filter(n) && {
-                    if case_sensitive {
-                        n.title.contains(title)
-                    } else {
-                        n.title.to_lowercase().contains(lower_title.as_str())
-                    }
-                }
-            };
-            if !self.filter.show_connected {
-                self.layout = GraphLayout::new(self.graph.nodes().filter(matcher), &self.graph, 0);
-            } else {
-                // TODO: 2-stage hilighting: direct and connected nodes
-                // TODO: Should tag filtering also apply here?
-                self.layout = GraphLayout::new(
-                    self.graph
-                        .nodes()
-                        .filter(matcher)
-                        .flat_map(|n| self.graph.dfs_limited(n.id, self.filter.max_nbrs))
-                        .unique_by(|n| n.id),
-                    &self.graph,
-                    0,
-                );
-            }
-        }
-    }
-
-    fn node_title_filter_changed(&mut self, ui: &mut egui::Ui) -> bool {
-        let mut changed = false;
-        let was_empty = self.filter.title.is_empty();
-        ui.horizontal(|ui| {
-            ui.label("Nodes");
-            changed = ui
-                .add(egui::TextEdit::singleline(&mut self.filter.title))
-                .changed();
-        });
-        let checkbox_changed = ui
-            .checkbox(&mut self.filter.show_connected, "include connected nodes")
-            .changed();
-        let depth_changed = ui.add(egui::Slider::new(&mut self.filter.max_nbrs, (0 as usize)..=20).clamping(egui::SliderClamping::Never)).changed();
-        if was_empty && self.filter.title.is_empty() {
-            // Prevent re-render if filter hasn't changed
-            return false;
-        }
-        changed || checkbox_changed || depth_changed
+        self.layout = self.filter.apply_to(&self.graph);
     }
 
     fn node_title_in_graph(
@@ -675,24 +710,23 @@ impl eframe::App for RoamUI {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Q)) {
             ctx.send_viewport_cmd(egui::viewport::ViewportCommand::Close);
         }
-        let mut tag_filter_changed = false;
-        let mut title_filter_changed = false;
-        egui::SidePanel::left("Graph Settings")
+        let mut filter_changed = false;
+        egui::SidePanel::left("Filters")
             .resizable(false)
             .show(ctx, |ui| {
                 ui.label("Filters");
                 ui.separator();
-                title_filter_changed = self.node_title_filter_changed(ui);
+                let filter_res = filter_ui(ui, &mut self.filter);
+                if filter_res.changed {
+                    filter_changed = true;
+                }
+                self.additional_highlighted.clear();
+                if let Some(hovered) = filter_res.hovered_tag {
+                    self.additional_highlighted =
+                        self.graph.tags.node_ids_for(hovered).cloned().collect();
+                }
                 ui.separator();
-                ui.vertical(|ui| {
-                    self.additional_highlighted.clear();
-                    let (changed, next_hover) = tag_selector(ui, &mut self.tag_state);
-                    tag_filter_changed = changed;
-                    if let Some(hovered) = next_hover {
-                        self.additional_highlighted =
-                            self.graph.tags.node_ids_for(hovered).cloned().collect();
-                    }
-                });
+                ui.label(format!("Showing {} / {}", self.layout.nodes.len(), self.graph.len()));
                 ui.separator();
                 self.graph_settings(ui);
             });
@@ -708,10 +742,10 @@ impl eframe::App for RoamUI {
                 .cloned()
                 .collect();
         }
-        if tag_filter_changed || title_filter_changed {
+
+        if filter_changed {
             self.apply_filter();
         }
-
         self.highlighted = next_hl;
 
         self.render_graph(ctx);
