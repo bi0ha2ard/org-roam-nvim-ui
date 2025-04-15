@@ -144,19 +144,27 @@ impl DfsDirection {
 
 pub struct DfsIterator<'a> {
     graph: &'a Graph,
-    to_visit: Vec<NodeId>,
+    to_visit: Vec<(usize, NodeId)>,
     visited: HashSet<NodeId>,
     dir: DfsDirection,
+    max_depth: usize,
 }
 
 impl<'a> DfsIterator<'a> {
     fn new(graph: &'a Graph, from: NodeId, dir: DfsDirection) -> DfsIterator<'a> {
         DfsIterator {
             graph,
-            to_visit: vec![from],
+            to_visit: vec![(0, from)],
             visited: HashSet::new(),
             dir,
+            max_depth: usize::MAX,
         }
+    }
+
+    pub fn depth_limit(self, limit: usize) -> Self {
+        let mut res = self;
+        res.max_depth = limit;
+        res
     }
 }
 
@@ -164,20 +172,21 @@ impl<'a> Iterator for DfsIterator<'a> {
     type Item = &'a Node;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(next) = self.to_visit.pop() {
-            // TODO: allow limiting depth
+        if let Some((depth, next)) = self.to_visit.pop() {
             self.visited.insert(next);
-            if self.dir.allows_out() {
-                for nbrs in self.graph.direct_links(next) {
-                    if !self.visited.contains(&nbrs.id) {
-                        self.to_visit.push(nbrs.id);
+            if depth < self.max_depth {
+                if self.dir.allows_out() {
+                    for nbrs in self.graph.direct_links(next) {
+                        if !self.visited.contains(&nbrs.id) {
+                            self.to_visit.push((depth + 1, nbrs.id));
+                        }
                     }
                 }
-            }
-            if self.dir.allows_in() {
-                for nbrs in self.graph.direct_backlinks(next) {
-                    if !self.visited.contains(&nbrs.id) {
-                        self.to_visit.push(nbrs.id);
+                if self.dir.allows_in() {
+                    for nbrs in self.graph.direct_backlinks(next) {
+                        if !self.visited.contains(&nbrs.id) {
+                            self.to_visit.push((depth + 1, nbrs.id));
+                        }
                     }
                 }
             }
@@ -286,8 +295,12 @@ impl Graph {
         self.nodes.get(id.0)
     }
 
-    pub fn bfs(&self, id: NodeId) -> impl Iterator<Item = &Node> {
+    pub fn dfs(&self, id: NodeId) -> impl Iterator<Item = &Node> {
         DfsIterator::new(self, id, DfsDirection::Both)
+    }
+
+    pub fn dfs_limited(&self, id: NodeId, limit: usize) -> impl Iterator<Item = &Node> {
+        DfsIterator::new(self, id, DfsDirection::Both).depth_limit(limit)
     }
 
     pub fn direct_links(&self, id: NodeId) -> impl Iterator<Item = &Node> {

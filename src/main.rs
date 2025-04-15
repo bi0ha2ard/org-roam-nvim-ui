@@ -184,6 +184,7 @@ impl GraphViewState {
 struct Filter {
     title: String,
     show_connected: bool,
+    max_nbrs: usize,
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -328,6 +329,7 @@ impl RoamUI {
             filter: Filter {
                 title: String::new(),
                 show_connected: true,
+                max_nbrs: 20
             },
             selected: None,
             highlighted: None,
@@ -361,11 +363,12 @@ impl RoamUI {
                 self.layout = GraphLayout::new(self.graph.nodes().filter(matcher), &self.graph, 0);
             } else {
                 // TODO: 2-stage hilighting: direct and connected nodes
+                // TODO: Should tag filtering also apply here?
                 self.layout = GraphLayout::new(
                     self.graph
                         .nodes()
                         .filter(matcher)
-                        .flat_map(|n| self.graph.bfs(n.id))
+                        .flat_map(|n| self.graph.dfs_limited(n.id, self.filter.max_nbrs))
                         .unique_by(|n| n.id),
                     &self.graph,
                     0,
@@ -386,11 +389,12 @@ impl RoamUI {
         let checkbox_changed = ui
             .checkbox(&mut self.filter.show_connected, "include connected nodes")
             .changed();
+        let depth_changed = ui.add(egui::Slider::new(&mut self.filter.max_nbrs, (0 as usize)..=20).clamping(egui::SliderClamping::Never)).changed();
         if was_empty && self.filter.title.is_empty() {
             // Prevent re-render if filter hasn't changed
             return false;
         }
-        changed || checkbox_changed
+        changed || checkbox_changed || depth_changed
     }
 
     fn node_title_in_graph(
