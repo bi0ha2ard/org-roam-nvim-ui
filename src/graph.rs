@@ -60,6 +60,12 @@ pub struct Node {
     pub mtime: u64,
 }
 
+impl Node {
+    pub fn degree(&self) -> usize {
+        self.links.end - self.links.start + self.backlinks.end - self.backlinks.start
+    }
+}
+
 #[derive(PartialEq)]
 pub struct Link {
     pub from: NodeId,

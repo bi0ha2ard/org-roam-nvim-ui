@@ -28,6 +28,24 @@ struct PlacedNode {
     graph_node_id: NodeId, // keep track of id in case we're filtered down later
 }
 
+struct LayoutOptimizerParams {
+    f_min: f32,
+    f_max: f32,
+    decay_rate: f64,
+    desired_dist: f32,
+}
+
+impl Default for LayoutOptimizerParams {
+    fn default() -> Self {
+        Self {
+            f_min: 0.05,
+            f_max: 80.0,
+            decay_rate: 0.95,
+            desired_dist: 10.0,
+        }
+    }
+}
+
 struct GraphLayout {
     // Current positions
     nodes: Vec<PlacedNode>,
@@ -35,6 +53,11 @@ struct GraphLayout {
     backlinks: Vec<SubgLink>,
     rng: rand::rngs::StdRng,
     to_screen: Similarity2<f32>,
+
+    params: LayoutOptimizerParams,
+    t_total: f64,
+    curr_damping: f64,
+    settled: bool,
 }
 
 impl GraphLayout {
@@ -73,7 +96,15 @@ impl GraphLayout {
             backlinks,
             rng: rand::rngs::StdRng::seed_from_u64(seed),
             to_screen: Similarity2::identity(),
+            params: LayoutOptimizerParams::default(),
+            t_total: 0.0,
+            curr_damping: 1.0,
+            settled: false,
         }
+    }
+
+    fn set_params(&mut self, params: LayoutOptimizerParams) {
+        self.params = params;
     }
 
     fn len_to_screen(&self, length: f32) -> f32 {
@@ -103,15 +134,43 @@ impl GraphLayout {
         self.nodes.iter().find(|n| n.graph_node_id == actual_id)
     }
 
-    fn tick(&mut self, dt: f32, force_min: f32, force_max: f32) -> bool {
+    fn reset_layout(&mut self) {
+        for n in &mut self.nodes {
+            n.p = Point::origin();
+        }
+        self.t_total = 0.0;
+        self.curr_damping = 1.0;
+        self.settled = false;
+        // TODO: also reset the RNG?
+    }
+
+    /// To avoid oscillation, just run twice each timestep, much smoother that way.
+    fn double_tick(&mut self, dt: f64) -> bool {
+        self.tick(dt / 2.0) || self.tick(dt / 2.0)
+    }
+
+    /// simulate one tick
+    /// Note: dt makes this frame-rate independent, but it also results in non-repeatable
+    /// simulatino granularity, so maybe that's not a good idea anyway.
+    fn tick(&mut self, dt: f64) -> bool {
+        if self.settled {
+            return true;
+        }
+        const T_UNDAMPED: f64 = 2.0;
+        const T_SCALE: f64 = 10.;
+        let dt = dt * T_SCALE;
+
         const MIN_DIST_FOR_DIR: f32 = 1e-6;
-        const LINK_FORCE_MULT: f32 = 4.0;
-        const DIST_FOR_LINKS: f32 = 10.0 * 10.0;
-        const MAX_DIST_FOR_FORCE: f32 = 20.0 * 20.0;
+        let link_force_mult: f32 = self.params.desired_dist;
+        let rep_force_mult: f32 = link_force_mult * link_force_mult;
+        let max_dist_for_force: f32 = (2.0 * link_force_mult) * (2.0 * link_force_mult);
+
         let distribution = rand::distributions::Uniform::<f32>::new_inclusive(-1.0, 1.0);
+
         for n in &mut self.nodes {
             n.f = Vector::zeros();
         }
+
         for (me, other) in (0..self.nodes.len()).tuple_combinations() {
             let displacement = {
                 let me = self.nodes.get(me).unwrap();
@@ -124,51 +183,63 @@ impl GraphLayout {
             } else {
                 displacement.normalize()
             };
-            let clamped_dist = clamp(dist, 0.01, 1e10);
+
+            let clamped_dist = clamp(dist, 0.001, 1e10);
             let is_connected = self.is_connected(SubgNodeId(me), SubgNodeId(other));
-            if dist > DIST_FOR_LINKS && is_connected {
+            if is_connected {
                 // Attracting
-                let f = LINK_FORCE_MULT * dt * dir.scale(1. / clamped_dist.min(9.));
+                let f = dir.scale(clamped_dist / link_force_mult);
                 self.nodes[other].f -= f;
                 self.nodes[me].f += f;
             }
-            if dist > MAX_DIST_FOR_FORCE {
+            if dist > max_dist_for_force {
                 continue;
             }
-            if is_connected && dist <= DIST_FOR_LINKS + 1. && dist > DIST_FOR_LINKS - 1. {
-                continue;
-            }
+            // if is_connected && dist <= DIST_FOR_LINKS + 1. && dist > DIST_FOR_LINKS - 1. {
+            //     continue;
+            // }
             // Repelling
-            self.nodes[other].f += dt * dir.scale(1. / clamped_dist);
-            self.nodes[me].f += dt * dir.scale(-1. / clamped_dist);
+            // self.nodes[other].f += dt * dir.scale(1. / clamped_dist);
+            let f = dir.scale(rep_force_mult / clamped_dist.sqrt());
+            self.nodes[other].f += f;
+            self.nodes[me].f -= f;
         }
         let mut skipped = 0;
         for n in &mut self.nodes {
-            let len = n.f.norm().min(force_max);
-            if len < force_min {
+            let len = n.f.norm().min(self.params.f_max) * (dt * self.curr_damping) as f32;
+            if len < self.params.f_min {
                 skipped += 1;
                 continue;
             }
             n.p += n.f.normalize() * len;
         }
-        skipped == self.nodes.len()
+        self.t_total += dt;
+        self.curr_damping = self
+            .params
+            .decay_rate
+            .powf((self.t_total - T_UNDAMPED).max(0.0));
+        self.settled = skipped == self.nodes.len();
+        self.settled
     }
 }
 
 struct GraphViewState {
-    dt: f32,
     force_min: f32,
     force_max: f32,
+    decay_rate: f32,
+    desired_dist: f32,
     zoom: f32,
     offset: egui::Vec2,
 }
 
 impl Default for GraphViewState {
     fn default() -> Self {
+        let l = LayoutOptimizerParams::default();
         Self {
-            dt: 0.2,
-            force_min: 0.002,
-            force_max: 1.0,
+            force_min: l.f_min,
+            force_max: l.f_max,
+            decay_rate: l.decay_rate as f32,
+            desired_dist: l.desired_dist,
             zoom: 1.,
             offset: egui::Vec2::default(),
         }
@@ -187,6 +258,7 @@ struct Filter {
 
     show_connected: bool,
     max_nbrs: usize,
+    filter_orphans: bool,
 }
 
 impl Filter {
@@ -204,22 +276,39 @@ impl Filter {
             },
             show_connected: true,
             max_nbrs: 20,
+            filter_orphans: false,
         }
     }
 
     fn apply_to(&self, graph: &Graph) -> GraphLayout {
+        // TODO: chainable filters with .and() and .or() or something
+        // Building up the filter this way sucks
         let title = self.node_title.as_str();
         let tag_filter = self.tag_state.build_filter();
+        let orphan_filter = |n: &&Node| {
+            if self.filter_orphans {
+                n.degree() > 0
+            } else {
+                true
+            }
+        };
         if title.is_empty() {
             if !self.tag_state.is_active() {
-                return GraphLayout::new(graph.nodes(), graph, 0);
+                return GraphLayout::new(graph.nodes().filter(orphan_filter), graph, 0);
             }
-            return GraphLayout::new(graph.nodes().filter(|n| tag_filter(n)), graph, 0);
+            return GraphLayout::new(
+                graph
+                    .nodes()
+                    .filter(orphan_filter)
+                    .filter(|n| tag_filter(n)),
+                graph,
+                0,
+            );
         }
         let case_sensitive = title.chars().any(|c| c.is_uppercase());
         let lower_title = title.to_lowercase();
         let matcher = |n: &&Node| {
-            tag_filter(n) && {
+            orphan_filter(n) && tag_filter(n) && {
                 if case_sensitive {
                     n.title.contains(title)
                 } else {
@@ -377,6 +466,10 @@ fn filter_ui<'a>(ui: &mut egui::Ui, filter: &'a mut Filter) -> FilterResponse<'a
         (changed, res)
     };
     ui.separator();
+    let orphans_changed = ui
+        .checkbox(&mut filter.filter_orphans, "Hide orphans")
+        .changed();
+    ui.separator();
     // If both of the others are false, this has no effect
     let nbrs_changed = {
         let checkbox_changed = ui
@@ -392,7 +485,7 @@ fn filter_ui<'a>(ui: &mut egui::Ui, filter: &'a mut Filter) -> FilterResponse<'a
         checkbox_changed || depth_changed
     };
     FilterResponse {
-        changed: nbrs_changed || tag_changed || title_changed,
+        changed: orphans_changed || nbrs_changed || tag_changed || title_changed,
         hovered_tag,
     }
 }
@@ -618,11 +711,14 @@ impl RoamUI {
 
             let offs = ctx.input(|i| i.viewport().inner_rect).map(|r| r.max - r.min).unwrap_or_else(||ui.min_size()) / 2.0;
             let painter = ui.painter();
-            let settled = self.layout.tick(
-                self.view_state.dt,
-                self.view_state.force_min,
-                self.view_state.force_max,
-            );
+            self.layout.set_params(LayoutOptimizerParams{
+                f_min: self.view_state.force_min,
+                f_max: self.view_state.force_max,
+                decay_rate: self.view_state.decay_rate as f64,
+                desired_dist: self.view_state.desired_dist
+            });
+            let dt = ui.input(|i|i.stable_dt) as f64;
+            let settled = self.layout.double_tick(dt);
             let mut hovered_node = None;
             let radius_screen = self.layout.len_to_screen(RADIUS);
 
@@ -650,6 +746,9 @@ impl RoamUI {
                 if mouse_over {
                     hovered_node = Some(n.graph_node_id);
                     self.highlighted = hovered_node;
+                } else if ui.ui_contains_pointer() {
+                    // Can't be hovering a node in the sidebar
+                    self.highlighted = None;
                 }
             }
             if clicked && hovered_node.map(|n| self.select_node(n)).is_none() {
@@ -687,21 +786,33 @@ impl RoamUI {
     }
 
     fn graph_settings(&mut self, ui: &mut egui::Ui) {
-        ui.label("Layout Settings");
-        ui.add(egui::Slider::new(&mut self.view_state.dt, 0.001_f32..=5.));
+        ui.label("desired_dist");
         ui.add(egui::Slider::new(
-            &mut self.view_state.force_max,
-            1_f32..=10.,
+            &mut self.view_state.desired_dist,
+            0_f32..=100.,
         ));
+        ui.label("f_min");
         ui.add(egui::Slider::new(
             &mut self.view_state.force_min,
             0_f32..=1.,
         ));
+        ui.label("f_max");
+        ui.add(egui::Slider::new(
+            &mut self.view_state.force_max,
+            1_f32..=1000.,
+        ));
+        ui.label("decay");
+        ui.add(egui::Slider::new(
+            &mut self.view_state.decay_rate,
+            0_f32..=1.,
+        ));
         if ui.button("Reset").clicked() {
-            for n in &mut self.layout.nodes {
-                n.p = Point::origin();
-            }
+            self.layout.reset_layout();
         }
+        ui.separator();
+        ui.label(format!("damping: {:.4}", self.layout.curr_damping));
+        ui.label(format!("t: {:.3}s", self.layout.t_total));
+        ui.label(format!("settled: {}", self.layout.settled));
     }
 }
 
@@ -726,9 +837,16 @@ impl eframe::App for RoamUI {
                         self.graph.tags.node_ids_for(hovered).cloned().collect();
                 }
                 ui.separator();
-                ui.label(format!("Showing {} / {}", self.layout.nodes.len(), self.graph.len()));
+                ui.label(format!(
+                    "Showing {} / {}",
+                    self.layout.nodes.len(),
+                    self.graph.len()
+                ));
                 ui.separator();
-                self.graph_settings(ui);
+                // TODO: ugly animation
+                ui.collapsing("Layout settings", |ui| {
+                    self.graph_settings(ui)
+                });
             });
         let (next_sel, next_hl, sel_tag) = self.render_selected(ctx);
         if let Some(next_selection) = next_sel {
