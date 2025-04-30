@@ -30,7 +30,7 @@ struct PlacedNode {
 
 struct LayoutOptimizerParams {
     f_min: f32,
-    f_max: f32,
+    f_max: f32, // TODO: remove. can probably just be 2x desired_dist or something
     decay_rate: f64,
     desired_dist: f32,
 }
@@ -171,28 +171,24 @@ impl GraphLayout {
             n.f = Vector::zeros();
         }
 
-        for (me, other) in (0..self.nodes.len()).tuple_combinations() {
-            let displacement = {
-                let me = self.nodes.get(me).unwrap();
-                let other = self.nodes.get(other).unwrap();
-                other.p - me.p
-            };
-            let dist = displacement.norm_squared();
-            let dir: Vector = if dist.abs() < MIN_DIST_FOR_DIR {
-                Vector::from_distribution(&distribution, &mut self.rng).normalize()
-            } else {
-                displacement.normalize()
+        let get_displacement =
+            move |me: &Point, other: &Point, rng: &mut rand::rngs::StdRng| -> (Vector, f32) {
+                let displacement = { other - me };
+                let dist = displacement.norm_squared();
+                let dir: Vector = if dist < MIN_DIST_FOR_DIR {
+                    Vector::from_distribution(&distribution, rng).normalize()
+                } else {
+                    displacement.normalize()
+                };
+                let clamped_dist = clamp(dist, 0.00001, 1e10);
+                (dir, clamped_dist)
             };
 
-            let clamped_dist = clamp(dist, 0.001, 1e10);
-            let is_connected = self.is_connected(SubgNodeId(me), SubgNodeId(other));
-            if is_connected {
-                // Attracting
-                let f = dir.scale(clamped_dist / link_force_mult);
-                self.nodes[other].f -= f;
-                self.nodes[me].f += f;
-            }
-            if dist > max_dist_for_force {
+        for (me, other) in (0..self.nodes.len()).tuple_combinations() {
+            let me_pos = self.nodes.get(me).unwrap().p;
+            let other_pos = self.nodes.get(other).unwrap().p;
+            let (dir, clamped_dist) = get_displacement(&me_pos, &other_pos, &mut self.rng);
+            if clamped_dist > max_dist_for_force {
                 continue;
             }
             // if is_connected && dist <= DIST_FOR_LINKS + 1. && dist > DIST_FOR_LINKS - 1. {
@@ -203,6 +199,16 @@ impl GraphLayout {
             let f = dir.scale(rep_force_mult / clamped_dist.sqrt());
             self.nodes[other].f += f;
             self.nodes[me].f -= f;
+        }
+        for SubgLink { from, to } in &self.links {
+            // Attracting
+            let me_pos = self.nodes.get(from.0).unwrap().p;
+            let other_pos = self.nodes.get(to.0).unwrap().p;
+            // This may pick another direction for zero vectors on the first tick...
+            let (dir, clamped_dist) = get_displacement(&me_pos, &other_pos, &mut self.rng);
+            let f = dir.scale(clamped_dist / link_force_mult);
+            self.nodes[from.0].f += f;
+            self.nodes[to.0].f -= f;
         }
         let mut skipped = 0;
         for n in &mut self.nodes {
@@ -844,9 +850,7 @@ impl eframe::App for RoamUI {
                 ));
                 ui.separator();
                 // TODO: ugly animation
-                ui.collapsing("Layout settings", |ui| {
-                    self.graph_settings(ui)
-                });
+                ui.collapsing("Layout settings", |ui| self.graph_settings(ui));
             });
         let (next_sel, next_hl, sel_tag) = self.render_selected(ctx);
         if let Some(next_selection) = next_sel {
