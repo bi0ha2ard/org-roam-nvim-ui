@@ -217,11 +217,17 @@ impl Graph {
             match v {
                 DBLink::Empty(_) => {}
                 DBLink::Links(l) => {
-                    for to in l.keys() {
-                        links.push(Link {
-                            from: NodeId(*tmp.get(k.as_str()).expect("from")),
-                            to: NodeId(*tmp.get(to.as_str()).expect("to")),
-                        });
+                    for to_hash in l.keys() {
+                        let from = tmp.get(k.as_str());
+                        let to = tmp.get(to_hash.as_str());
+                        if let (Some(from), Some(to)) = (from, to) {
+                            links.push(Link {
+                                from: NodeId(*from),
+                                to: NodeId(*to),
+                            });
+                        } else {
+                            println!("Broken link between {k} ({:?}) and {to_hash} ({:?})", from, to);
+                        }
                     }
                 }
             }
@@ -232,10 +238,16 @@ impl Graph {
                 DBLink::Empty(_) => {}
                 DBLink::Links(l) => {
                     for backlink_source in l.keys() {
-                        backlinks.push(Link {
-                            from: NodeId(*tmp.get(backlink_source.as_str()).expect("from")),
-                            to: NodeId(*tmp.get(k.as_str()).expect("to")),
-                        });
+                        let from = tmp.get(backlink_source.as_str());
+                        let to = tmp.get(k.as_str());
+                        if let (Some(from), Some(to)) = (from, to) {
+                            backlinks.push(Link {
+                                from: NodeId(*from),
+                                to: NodeId(*to)
+                            });
+                        } else {
+                            println!("Broken backlink between {backlink_source} ({:?}) and {k} ({:?})", from, to);
+                        }
                     }
                 }
             }
