@@ -558,6 +558,7 @@ impl RoamUI {
 
     fn apply_filter(&mut self) {
         self.layout = self.filter.apply_to(&self.graph);
+        self.apply_view_state();
     }
 
     fn node_title_in_graph(
@@ -743,6 +744,12 @@ impl RoamUI {
 
     fn pan_by(&mut self, delta: egui::Vec2) {
         self.view_state.offset += delta;
+        self.layout.to_screen.isometry.translation.x = self.view_state.offset.x;
+        self.layout.to_screen.isometry.translation.y = self.view_state.offset.y;
+    }
+
+    fn apply_view_state(&mut self) {
+        self.layout.to_screen.set_scaling(self.view_state.zoom);
         self.layout.to_screen.isometry.translation.x = self.view_state.offset.x;
         self.layout.to_screen.isometry.translation.y = self.view_state.offset.y;
     }
