@@ -10,6 +10,7 @@ use history::History;
 use itertools::Itertools;
 use nalgebra::{Point2, Similarity2, Vector2, clamp};
 use rand::SeedableRng;
+use rand::distr::Uniform;
 
 use crate::commands::CommandIPC;
 
@@ -156,19 +157,20 @@ impl GraphLayout {
     /// Note: dt makes this frame-rate independent, but it also results in non-repeatable
     /// simulatino granularity, so maybe that's not a good idea anyway.
     fn tick(&mut self, dt: f64) -> bool {
+        const T_UNDAMPED: f64 = 2.0;
+        const T_SCALE: f64 = 10.;
+        const MIN_DIST_FOR_DIR: f32 = 1e-6;
+
         if self.settled {
             return true;
         }
-        const T_UNDAMPED: f64 = 2.0;
-        const T_SCALE: f64 = 10.;
         let dt = dt * T_SCALE;
 
-        const MIN_DIST_FOR_DIR: f32 = 1e-6;
         let link_force_mult: f32 = self.params.desired_dist;
         let rep_force_mult: f32 = link_force_mult * link_force_mult;
         let max_dist_for_force: f32 = (2.0 * link_force_mult) * (2.0 * link_force_mult);
 
-        let distribution = rand::distributions::Uniform::<f32>::new_inclusive(-1.0, 1.0);
+        let distribution = Uniform::<f32>::new_inclusive(-1.0, 1.0).expect("random distribution");
 
         for n in &mut self.nodes {
             n.f = Vector::zeros();
