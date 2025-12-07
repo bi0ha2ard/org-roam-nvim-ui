@@ -1,24 +1,18 @@
-fn main() -> std::io::Result<()> {
-    let mut buf = String::new();
+use crate::commands::{Command, CommandIPC};
+
+mod commands;
+
+fn main() {
     println!("Hello");
-    'reading: loop {
-        buf.clear();
-        let _read = std::io::stdin().read_line(&mut buf)?;
-        let cmd = buf.trim_end_matches('\n');
-        match cmd {
-            "quit" => {
-                println!("Quitting");
-                break 'reading;
-            }
-            msg if msg.len() > 0 => {
-                eprintln!("Unknown command '{msg}'");
-            }
-            msg => {
-                assert!(msg.is_empty());
-                eprintln!("Unknown empty '{msg}'");
+    let (mut cmd, handle) = CommandIPC::new(|| println!("Notify!"));
+    loop {
+        if let Some(c) = cmd.try_pull() {
+            match c {
+                Command::Quit => break,
+                Command::Echo(s) => println!("Echo {s}"),
+                Command::Select(s) => println!("Select {s}"),
             }
         }
-        std::thread::sleep(std::time::Duration::from_secs(1));
     }
-    Ok(())
+    let _ = handle.join();
 }

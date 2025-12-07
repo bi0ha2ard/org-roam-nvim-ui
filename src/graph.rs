@@ -34,7 +34,7 @@ struct Database {
     indexes: Indexes,
 }
 
-#[derive(Default, Eq, PartialEq, PartialOrd, Ord, Copy, Clone, Hash)]
+#[derive(Default, Eq, PartialEq, PartialOrd, Ord, Copy, Clone, Hash, Debug)]
 pub struct NodeId(usize);
 
 #[derive(Deserialize)]
@@ -74,9 +74,10 @@ pub struct Link {
 
 pub struct Graph {
     nodes: Vec<Node>,
-    links: Vec<Link>,     // from -> to, sorted by from
-    backlinks: Vec<Link>, // from -> to, sorted by to
-    pub tags: MultiMap,   // tag  -> Node range
+    links: Vec<Link>,                     // from -> to, sorted by from
+    backlinks: Vec<Link>,                 // from -> to, sorted by to
+    pub tags: MultiMap,                   // tag  -> Node range
+    uuid_lookup: HashMap<String, NodeId>, // UUID -> Node range
 }
 
 pub struct MultiMap {
@@ -208,9 +209,9 @@ impl Graph {
         for (id, n) in nodes.iter_mut().enumerate() {
             n.id = NodeId(id);
         }
-        let mut tmp = HashMap::<&str, usize>::new();
+        let mut uuid_lookup = HashMap::<String, NodeId>::new();
         for (id, n) in nodes.iter().enumerate() {
-            tmp.insert(n.uuid.as_str(), id);
+            uuid_lookup.insert(n.uuid.clone(), NodeId(id));
         }
         let mut links = Vec::new();
         for (k, v) in db.outbound {
@@ -218,15 +219,12 @@ impl Graph {
                 DBLink::Empty(_) => {}
                 DBLink::Links(l) => {
                     for to_hash in l.keys() {
-                        let from = tmp.get(k.as_str());
-                        let to = tmp.get(to_hash.as_str());
-                        if let (Some(from), Some(to)) = (from, to) {
-                            links.push(Link {
-                                from: NodeId(*from),
-                                to: NodeId(*to),
-                            });
+                        let from = uuid_lookup.get(k.as_str());
+                        let to = uuid_lookup.get(to_hash.as_str());
+                        if let (Some(&from), Some(&to)) = (from, to) {
+                            links.push(Link { from, to });
                         } else {
-                            println!("Broken link between {k} ({:?}) and {to_hash} ({:?})", from, to);
+                            eprintln!("Broken link between {k} ({from:?}) and {to_hash} ({to:?})");
                         }
                     }
                 }
@@ -238,15 +236,14 @@ impl Graph {
                 DBLink::Empty(_) => {}
                 DBLink::Links(l) => {
                     for backlink_source in l.keys() {
-                        let from = tmp.get(backlink_source.as_str());
-                        let to = tmp.get(k.as_str());
-                        if let (Some(from), Some(to)) = (from, to) {
-                            backlinks.push(Link {
-                                from: NodeId(*from),
-                                to: NodeId(*to)
-                            });
+                        let from = uuid_lookup.get(backlink_source.as_str());
+                        let to = uuid_lookup.get(k.as_str());
+                        if let (Some(&from), Some(&to)) = (from, to) {
+                            backlinks.push(Link { from, to });
                         } else {
-                            println!("Broken backlink between {backlink_source} ({:?}) and {k} ({:?})", from, to);
+                            eprintln!(
+                                "Broken backlink between {backlink_source} ({from:?}) and {k} ({to:?})"
+                            );
                         }
                     }
                 }
@@ -290,6 +287,7 @@ impl Graph {
             links,
             backlinks,
             tags,
+            uuid_lookup,
         }
     }
 
@@ -315,6 +313,10 @@ impl Graph {
 
     pub fn node(&self, id: NodeId) -> Option<&Node> {
         self.nodes.get(id.0)
+    }
+
+    pub fn node_by_uuid(&self, uuid: &str) -> Option<&Node> {
+        self.uuid_lookup.get(uuid).and_then(|&id| self.node(id))
     }
 
     pub fn dfs(&self, id: NodeId) -> impl Iterator<Item = &Node> {
@@ -352,7 +354,7 @@ impl Graph {
         }
     }
 
-    fn dot(&self) -> String {
+    fn _dot(&self) -> String {
         let mut res = String::new();
         res.push_str("digraph {");
         for n in &self.nodes {

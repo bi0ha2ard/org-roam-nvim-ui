@@ -1,3 +1,4 @@
+mod commands;
 mod graph;
 mod history;
 
@@ -9,6 +10,8 @@ use history::History;
 use itertools::Itertools;
 use nalgebra::{Point2, Similarity2, Vector2, clamp};
 use rand::SeedableRng;
+
+use crate::commands::CommandIPC;
 
 type Point = Point2<f32>;
 type Vector = Vector2<f32>;
@@ -497,6 +500,7 @@ fn filter_ui<'a>(ui: &mut egui::Ui, filter: &'a mut Filter) -> FilterResponse<'a
 }
 
 struct RoamUI {
+    commands: CommandIPC,
     graph: Graph,
     layout: GraphLayout,
     history: History<NodeId>,
@@ -515,7 +519,12 @@ impl RoamUI {
         let graph = load_graph();
         let filter = Filter::from_graph(&graph);
         let layout = filter.apply_to(&graph);
+        let cc_clone = cc.egui_ctx.clone();
+        let (commands, _) = CommandIPC::new(move || {
+            cc_clone.request_repaint();
+        });
         Self {
+            commands,
             graph,
             layout,
             history: History::default(),
@@ -524,6 +533,22 @@ impl RoamUI {
             selected: None,
             highlighted: None,
             additional_highlighted: Vec::new(),
+        }
+    }
+
+    fn process_commands(&mut self, ctx: &egui::Context) {
+        if let Some(cmd) = self.commands.try_pull() {
+            match cmd {
+                commands::Command::Quit => {
+                    ctx.send_viewport_cmd(egui::viewport::ViewportCommand::Close);
+                }
+                commands::Command::Echo(s) => println!("echo {s}"),
+                commands::Command::Select(s) => {
+                    if let Some(node) = self.graph.node_by_uuid(&s) {
+                        self.select_node(node.id);
+                    }
+                }
+            }
         }
     }
 
@@ -823,10 +848,11 @@ impl RoamUI {
 }
 
 impl eframe::App for RoamUI {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Q)) {
             ctx.send_viewport_cmd(egui::viewport::ViewportCommand::Close);
         }
+        self.process_commands(ctx);
         let mut filter_changed = false;
         egui::SidePanel::left("Filters")
             .resizable(false)
