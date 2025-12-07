@@ -241,6 +241,7 @@ struct GraphViewState {
     desired_dist: f32,
     zoom: f32,
     offset: egui::Vec2,
+    previous_size: egui::Vec2,
 }
 
 impl Default for GraphViewState {
@@ -253,6 +254,7 @@ impl Default for GraphViewState {
             desired_dist: l.desired_dist,
             zoom: 1.,
             offset: egui::Vec2::default(),
+            previous_size: egui::Vec2::default(),
         }
     }
 }
@@ -562,13 +564,11 @@ impl RoamUI {
         &self,
         painter: &egui::Painter,
         node: &PlacedNode,
-        offs: &egui::Vec2,
         text_color: egui::Color32,
     ) {
         painter.text(
             self.layout
-                .pt_to_screen(node.p - Vector::new(0.0, 1.0) * (RADIUS + 0.5))
-                + *offs,
+                .pt_to_screen(node.p - Vector::new(0.0, 1.0) * (RADIUS + 0.5)),
             egui::Align2::CENTER_CENTER,
             &self.graph.node(node.graph_node_id).unwrap().title,
             egui::FontId::default(),
@@ -681,7 +681,7 @@ impl RoamUI {
         }
     }
 
-    fn draw_links(&self, painter: &egui::Painter, offs: egui::Vec2) {
+    fn draw_links(&self, painter: &egui::Painter) {
         let alpha = if self.selected.is_some() { 0.5 } else { 1.0 };
         let regular_stroke = egui::Stroke::new(alpha, egui::Color32::YELLOW);
 
@@ -689,7 +689,7 @@ impl RoamUI {
         for l in &self.layout.links {
             let left = self.layout.node_screen_pos(l.from);
             let right = self.layout.node_screen_pos(l.to);
-            painter.line_segment([left + offs, right + offs], regular_stroke);
+            painter.line_segment([left, right], regular_stroke);
         }
 
         // Network around selected node
@@ -707,17 +707,44 @@ impl RoamUI {
                 if let Some(other_placed) = self.layout.by_real_id(other_graph.id) {
                     let left = self.layout.node_screen_pos(in_layout.layout_id);
                     let right = self.layout.node_screen_pos(other_placed.layout_id);
-                    painter.line_segment([left + offs, right + offs], link_stroke);
+                    painter.line_segment([left, right], link_stroke);
                 }
             }
             for other_graph in self.graph.direct_backlinks(selection.node) {
                 if let Some(other_placed) = self.layout.by_real_id(other_graph.id) {
                     let left = self.layout.node_screen_pos(other_placed.layout_id);
                     let right = self.layout.node_screen_pos(in_layout.layout_id);
-                    painter.line_segment([left + offs, right + offs], backlink_stroke);
+                    painter.line_segment([left, right], backlink_stroke);
                 }
             }
         }
+    }
+
+    fn zoom_by(&mut self, delta_y: f32, pointer_pos: Option<egui::Pos2>) {
+        let world_before_zoom = pointer_pos.map(|pos| {
+            self.layout
+                .to_screen
+                .inverse_transform_point(&Point::new(pos.x, pos.y))
+        });
+        self.view_state.zoom = (self.view_state.zoom
+            + (self.view_state.zoom / 400.).clamp(0., 0.1) * delta_y)
+            .clamp(0.1, 400.0);
+        self.layout.to_screen.set_scaling(self.view_state.zoom);
+        let world_after = world_before_zoom.map(|pos| {
+            self.layout
+                .to_screen
+                .transform_point(&Point::new(pos.x, pos.y))
+        });
+        if let (Some(before), Some(after)) = (pointer_pos, world_after) {
+            let diff = egui::Vec2::new(before.x - after.x, before.y - after.y);
+            self.pan_by(diff);
+        }
+    }
+
+    fn pan_by(&mut self, delta: egui::Vec2) {
+        self.view_state.offset += delta;
+        self.layout.to_screen.isometry.translation.x = self.view_state.offset.x;
+        self.layout.to_screen.isometry.translation.y = self.view_state.offset.y;
     }
 
     fn render_graph(&mut self, ctx: &egui::Context) {
@@ -726,43 +753,41 @@ impl RoamUI {
             if ui.ui_contains_pointer() {
                 ui.input(|i| {
                     clicked = i.pointer.primary_clicked();
+                    // TODO: zoom to mouse pos
                     if i.smooth_scroll_delta.y != 0. {
-                        self.view_state.zoom = (self.view_state.zoom
-                            + (self.view_state.zoom / 400.).clamp(0., 0.1)
-                                * i.smooth_scroll_delta.y)
-                            .clamp(0.1, 400.0);
+                        self.zoom_by(i.smooth_scroll_delta.y, i.pointer.latest_pos());
                     }
                     if i.pointer.primary_down() && i.pointer.is_decidedly_dragging() {
-                        self.view_state.offset += i.pointer.delta()
+                        self.pan_by(i.pointer.delta());
                     }
                 });
             }
-            // TODO: zoom to mouse pos
-            self.layout.to_screen.set_scaling(self.view_state.zoom);
-            self.layout.to_screen.isometry.translation.x = self.view_state.offset.x;
-            self.layout.to_screen.isometry.translation.y = self.view_state.offset.y;
 
-            let offs = ctx.input(|i| i.viewport().inner_rect).map(|r| r.max - r.min).unwrap_or_else(||ui.min_size()) / 2.0;
+            let size = ctx.input(|i| i.viewport().inner_rect).map_or_else(||ui.min_size(), |r| r.max - r.min);
+            if size != self.view_state.previous_size {
+                let diff = (size - self.view_state.previous_size) * 0.5;
+                self.pan_by(diff);
+                self.view_state.previous_size = size;
+            }
             let painter = ui.painter();
             self.layout.set_params(LayoutOptimizerParams{
                 f_min: self.view_state.force_min,
                 f_max: self.view_state.force_max,
-                decay_rate: self.view_state.decay_rate as f64,
+                decay_rate: f64::from(self.view_state.decay_rate),
                 desired_dist: self.view_state.desired_dist
             });
-            let dt = ui.input(|i|i.stable_dt) as f64;
+            let dt = f64::from(ui.input(|i|i.stable_dt));
             let settled = self.layout.double_tick(dt);
             let mut hovered_node = None;
             let radius_screen = self.layout.len_to_screen(RADIUS);
 
-            self.draw_links(painter, offs);
+            self.draw_links(painter);
 
             for n in &self.layout.nodes {
-                let pos = self.layout.pt_to_screen(n.p) + offs;
+                let pos = self.layout.pt_to_screen(n.p);
                 let mouse_over = ctx
                     .pointer_latest_pos()
-                    .map(|p| (p - pos).length_sq() <= radius_screen * radius_screen)
-                    .unwrap_or(false);
+                    .is_some_and(|p| (p - pos).length_sq() <= radius_screen * radius_screen);
                 painter.circle_filled(
                     pos,
                     radius_screen,
@@ -792,9 +817,9 @@ impl RoamUI {
                 egui::Color32::from_rgba_unmultiplied(128, 128, 128, (text_alpha * 255.) as u8);
             for n in &self.layout.nodes {
                 if matches!(&self.selected.as_ref().map(|n|n.node), Some(id) if *id == n.graph_node_id) {
-                    self.node_title_in_graph(painter, n, &offs, egui::Color32::ORANGE);
+                    self.node_title_in_graph(painter, n, egui::Color32::ORANGE);
                 } else if text_alpha > 0. {
-                    self.node_title_in_graph(painter, n, &offs, text_color);
+                    self.node_title_in_graph(painter, n, text_color);
                 }
             }
             if ui.ui_contains_pointer() {
