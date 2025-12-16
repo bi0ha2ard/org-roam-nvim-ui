@@ -17,14 +17,21 @@ enum DBLink {
 #[serde(untagged)]
 enum HashOrEmpty {
     Hash(HashMap<String, bool>),
-    Empty([bool; 0]), // if some tag goes away, aparantly the entry becomes "tag": []
+    Empty([bool; 0]), // if some tag goes away, apparently the entry becomes "tag": []
 }
 
 type NestedHash = HashMap<String, HashOrEmpty>;
 
 #[derive(Deserialize)]
+#[serde(untagged)]
+enum NestedHashOrEmpty {
+    NestedHash(NestedHash),
+    Empty([bool; 0]),
+}
+
+#[derive(Deserialize)]
 struct Indexes {
-    tag: NestedHash,
+    tag: NestedHashOrEmpty,
 }
 
 #[derive(Deserialize)]
@@ -98,7 +105,7 @@ impl MultiMap {
     }
 }
 
-fn nested_hash_to_multimap(nested: &NestedHash, nodes: &[Node]) -> MultiMap {
+fn nested_hash_to_multimap(nested: &NestedHashOrEmpty, nodes: &[Node]) -> MultiMap {
     let mut node_to_id = HashMap::new();
     for n in nodes {
         node_to_id.insert(n.uuid.as_str(), n.id);
@@ -108,16 +115,15 @@ fn nested_hash_to_multimap(nested: &NestedHash, nodes: &[Node]) -> MultiMap {
     let mut table = HashMap::new();
 
     let mut from = 0;
-    for (k, v) in nested {
-        match v {
-            HashOrEmpty::Hash(inner) => {
+    if let NestedHashOrEmpty::NestedHash(nested) = nested {
+        for (k, v) in nested {
+            if let HashOrEmpty::Hash(inner) = v {
                 for node_uuid in inner.keys() {
                     data.push(*node_to_id.get(node_uuid.as_str()).expect("Broken index"));
                 }
                 table.insert(k.clone(), from..data.len());
                 from = data.len();
             }
-            HashOrEmpty::Empty(_) => {}
         }
     }
 
