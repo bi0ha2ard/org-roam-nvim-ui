@@ -1,10 +1,12 @@
 mod commands;
 mod graph;
 mod history;
+mod style;
 
 use std::fmt::Display;
 
 use eframe::egui;
+use egui::Color32;
 use graph::{Graph, Link, Node, NodeDetails, NodeId, load_graph};
 use history::History;
 use itertools::Itertools;
@@ -13,6 +15,7 @@ use rand::SeedableRng;
 use rand::distr::Uniform;
 
 use crate::commands::CommandIPC;
+use crate::style::{GRUVBOX, graph_style, set_theme};
 
 type Point = Point2<f32>;
 type Vector = Vector2<f32>;
@@ -527,6 +530,11 @@ impl RoamUI {
         let (commands, _) = CommandIPC::new(move || {
             cc_clone.request_repaint();
         });
+        for t in [egui::Theme::Dark, egui::Theme::Light] {
+            cc.egui_ctx.style_mut_of(t, |s| {
+                set_theme(t, s);
+            });
+        }
         Self {
             commands,
             graph,
@@ -605,6 +613,7 @@ impl RoamUI {
 
         egui::SidePanel::right("selected")
             .exact_width(200.)
+            .resizable(false)
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.vertical_centered(|ui| {
@@ -684,7 +693,8 @@ impl RoamUI {
 
     fn draw_links(&self, painter: &egui::Painter) {
         let alpha = if self.selected.is_some() { 0.5 } else { 1.0 };
-        let regular_stroke = egui::Stroke::new(alpha, egui::Color32::YELLOW);
+        let theme = graph_style(painter.ctx().theme());
+        let regular_stroke = egui::Stroke::new(alpha, theme.edge);
 
         // All links
         for l in &self.layout.links {
@@ -702,8 +712,8 @@ impl RoamUI {
             }
             None
         }) {
-            let link_stroke = egui::Stroke::new(1.0, egui::Color32::RED);
-            let backlink_stroke = egui::Stroke::new(1.0, egui::Color32::MAGENTA);
+            let link_stroke = egui::Stroke::new(1.0, theme.out_link);
+            let backlink_stroke = egui::Stroke::new(1.0, theme.backlink);
             for other_graph in self.graph.direct_links(selection.node) {
                 if let Some(other_placed) = self.layout.by_real_id(other_graph.id) {
                     let left = self.layout.node_screen_pos(in_layout.layout_id);
@@ -755,6 +765,7 @@ impl RoamUI {
     }
 
     fn render_graph(&mut self, ctx: &egui::Context) {
+        let node_colors = graph_style(ctx.theme()).node;
         egui::CentralPanel::default().show(ctx, |ui| {
             let mut clicked = false;
             if ui.ui_contains_pointer() {
@@ -795,18 +806,20 @@ impl RoamUI {
                 let mouse_over = ctx
                     .pointer_latest_pos()
                     .is_some_and(|p| (p - pos).length_sq() <= radius_screen * radius_screen);
+                let (color, size) =
+                    if mouse_over || matches!(&self.highlighted, Some(id) if *id == n.graph_node_id) {
+                        (node_colors.hover, radius_screen * 1.1)
+                    } else if matches!(&self.selected.as_ref().map(|n|n.node), Some(id) if *id == n.graph_node_id) {
+                        (node_colors.selected, radius_screen)
+                    } else if self.additional_highlighted.contains(&n.graph_node_id) {
+                        (node_colors.highlight, radius_screen * 1.1)
+                    } else {
+                        (node_colors.color, radius_screen)
+                    };
                 painter.circle_filled(
                     pos,
-                    radius_screen,
-                    if mouse_over || matches!(&self.highlighted, Some(id) if *id == n.graph_node_id) {
-                        egui::Color32::BLUE
-                    } else if matches!(&self.selected.as_ref().map(|n|n.node), Some(id) if *id == n.graph_node_id) {
-                        egui::Color32::ORANGE
-                    } else if self.additional_highlighted.contains(&n.graph_node_id) {
-                        egui::Color32::CYAN
-                    } else {
-                        egui::Color32::RED
-                    },
+                    size,
+                    color
                 );
                 if mouse_over {
                     hovered_node = Some(n.graph_node_id);
@@ -820,11 +833,15 @@ impl RoamUI {
                 self.deselect_node();
             }
             let text_alpha = self.view_state.text_alpha();
-            let text_color =
-                egui::Color32::from_rgba_unmultiplied(128, 128, 128, (text_alpha * 255.) as u8);
+            let text_color = if ctx.theme() == egui::Theme::Dark {
+                GRUVBOX.light1
+            } else {
+                GRUVBOX.dark0
+            }.gamma_multiply(text_alpha);
+            let selected_text = GRUVBOX.neutral_orange;
             for n in &self.layout.nodes {
                 if matches!(&self.selected.as_ref().map(|n|n.node), Some(id) if *id == n.graph_node_id) {
-                    self.node_title_in_graph(painter, n, egui::Color32::ORANGE);
+                    self.node_title_in_graph(painter, n, selected_text);
                 } else if text_alpha > 0. {
                     self.node_title_in_graph(painter, n, text_color);
                 }
@@ -900,7 +917,7 @@ impl eframe::App for RoamUI {
                 self.additional_highlighted.clear();
                 if let Some(hovered) = filter_res.hovered_tag {
                     self.additional_highlighted =
-                        self.graph.tags.node_ids_for(hovered).cloned().collect();
+                        self.graph.tags.node_ids_for(hovered).copied().collect();
                 }
                 ui.separator();
                 ui.label(format!(
@@ -911,6 +928,17 @@ impl eframe::App for RoamUI {
                 ui.separator();
                 // TODO: ugly animation
                 ui.collapsing("Layout settings", |ui| self.graph_settings(ui));
+
+                egui::TopBottomPanel::bottom("settings")
+                    .resizable(false)
+                    .show_inside(ui, |ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::RIGHT), |ui| {
+                            egui::widgets::global_theme_preference_switch(ui);
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::LEFT), |ui| {
+                                ui.label("Theme");
+                            });
+                        });
+                    });
             });
         let (next_sel, next_hl, sel_tag) = self.render_selected(ctx);
         if let Some(next_selection) = next_sel {
@@ -921,7 +949,7 @@ impl eframe::App for RoamUI {
                 .graph
                 .tags
                 .node_ids_for(sel_tag.as_str())
-                .cloned()
+                .copied()
                 .collect();
         }
 
