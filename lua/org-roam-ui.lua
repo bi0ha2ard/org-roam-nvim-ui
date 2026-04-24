@@ -1,6 +1,8 @@
 -- Running process, if any
 local process = nil;
 
+local roam = require('org-roam')
+
 local M = {}
 
 local function project_root()
@@ -36,6 +38,30 @@ local config = {
   executable = find_executable()
 }
 
+-- Triggered from the graphic ui
+local open_selected_file = function(node_id)
+  roam.database:get(node_id):next(function(node)
+    if node then
+      -- Probably should do more sanitization here...
+      local buf = vim.uri_to_bufnr("file://" .. node.file)
+      -- TODO: probably also go to the headline of the node
+      vim.api.nvim_win_set_buf(0, buf)
+    else
+      vim.notify("org-roam-nvim-ui: open: node " .. node_id .. ": not found")
+    end
+  end)
+end
+
+-- org-roam-nvim-ui -> nvim
+local parse_commands = function(data)
+  data = vim.trim(data)
+  if vim.startswith(data, "open ") then
+    open_selected_file(string.sub(data, 6))
+  else
+    vim.notify("org-roam-nvim-ui: unknown command " .. data)
+  end
+end
+
 M.setup = function(opts)
   opts = opts or {}
   if not opts.executable then
@@ -60,7 +86,7 @@ M.start = function()
         assert(not err, err)
         if data then
           vim.schedule(function()
-            vim.notify("stdin " .. data)
+            parse_commands(data)
           end)
         end
       end,
@@ -79,8 +105,6 @@ M.start = function()
     end
   )
 end
-
-local roam = require('org-roam')
 
 M.open_at = function(file)
   M.start()

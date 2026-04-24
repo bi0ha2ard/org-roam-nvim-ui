@@ -14,7 +14,7 @@ use nalgebra::{Point2, Similarity2, Vector2, clamp};
 use rand::SeedableRng;
 use rand::distr::Uniform;
 
-use crate::commands::CommandIPC;
+use crate::commands::{CommandIPC, NvimCommand};
 use crate::style::{GRUVBOX, graph_style, set_theme};
 
 type Point = Point2<f32>;
@@ -557,7 +557,7 @@ impl RoamUI {
                 commands::Command::Quit => {
                     ctx.send_viewport_cmd(egui::viewport::ViewportCommand::Close);
                 }
-                commands::Command::Echo(s) => println!("echo {s}"),
+                commands::Command::Echo(s) => self.commands.send_to_nvim(NvimCommand::Echo(s)),
                 commands::Command::Select(s) => {
                     if let Some(node) = self.graph.node_by_uuid(&s) {
                         self.select_node(node.id);
@@ -623,7 +623,17 @@ impl RoamUI {
             .resizable(false)
             .show_inside(ui, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.heading(&node.title);
+                    if ui
+                        .add(
+                            egui::widgets::Label::new(egui::RichText::new(&node.title).heading())
+                                .sense(egui::Sense::click())
+                                .selectable(false),
+                        )
+                        .clicked()
+                    {
+                        self.commands
+                            .send_to_nvim(NvimCommand::Open(node.uuid.clone()));
+                    }
                     for alias in &node.aliases {
                         ui.label(format!("(alias {alias})"));
                     }

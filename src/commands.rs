@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::{collections::VecDeque, str::FromStr, sync::Arc, thread::JoinHandle};
 
 #[derive(Debug)]
@@ -5,6 +6,23 @@ pub enum Command {
     Quit,
     Echo(String),
     Select(String),
+}
+
+#[derive(Debug)]
+pub enum NvimCommand {
+    /// Opens the node in the current window.
+    /// roam does the UUID -> filename transform on the nvim side
+    Open(String),
+    Echo(String),
+}
+
+impl NvimCommand {
+    fn write(&self, stream: &mut impl Write) -> std::io::Result<()> {
+        match self {
+            NvimCommand::Open(id) => writeln!(stream, "open {id}"),
+            NvimCommand::Echo(pong) => writeln!(stream, "echo {pong}"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -63,6 +81,10 @@ impl CommandIPC {
         };
         let handle = s.read_stdin(notify);
         (s, handle)
+    }
+
+    pub fn send_to_nvim(&self, command: NvimCommand) {
+        let _ = command.write(&mut std::io::stdout());
     }
 
     pub fn push(&mut self, command: Command) {
