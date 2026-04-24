@@ -6,7 +6,7 @@ mod style;
 use std::fmt::Display;
 
 use eframe::egui;
-use egui::Color32;
+use egui::{Color32, Sense};
 use graph::{Graph, Link, Node, NodeDetails, NodeId, load_graph};
 use history::History;
 use itertools::Itertools;
@@ -15,7 +15,7 @@ use rand::SeedableRng;
 use rand::distr::Uniform;
 
 use crate::commands::CommandIPC;
-use crate::style::{GRUVBOX, graph_style, set_theme};
+use crate::style::{GRUVBOX, GraphTheme, graph_style, set_theme};
 
 type Point = Point2<f32>;
 type Vector = Vector2<f32>;
@@ -514,7 +514,8 @@ struct RoamUI {
     view_state: GraphViewState,
     filter: Filter,
     selected: Option<NodeDetails>,
-    highlighted: Option<NodeId>,
+    highlighted_graph: Option<NodeId>,
+    highlighted_sidebar: Option<NodeId>,
     additional_highlighted: Vec<NodeId>, // TODO: HashSet may or may not be faster, but n is small
 }
 
@@ -543,7 +544,8 @@ impl RoamUI {
             view_state: GraphViewState::default(),
             filter,
             selected: None,
-            highlighted: None,
+            highlighted_graph: None,
+            highlighted_sidebar: None,
             additional_highlighted: Vec::new(),
         }
     }
@@ -590,23 +592,30 @@ impl RoamUI {
         ctx: &egui::Context,
     ) -> (Option<NodeId>, Option<NodeId>, Option<String>) {
         let Some(details) = &self.selected else {
-            return (None, self.highlighted, None);
+            return (None, None, None);
         };
         let mut selected_tag = None;
         let mut clicked = None;
         let mut highlighted = None;
         let node = self.graph.node(details.node).expect("node exists");
+        let hl_node_col = graph_style(ctx.theme()).node.hover;
 
         let mut render_link = |ui: &mut egui::Ui, (id, text): &(NodeId, String)| {
-            let mut l = ui.label(text);
-            let contains_pointer = l.contains_pointer();
-            if contains_pointer {
+            let externally_highlighted =
+                matches!(self.highlighted_graph, Some(hl_id) if hl_id == *id);
+            ui.style_mut().visuals.widgets.hovered.fg_stroke.color = hl_node_col;
+            let mut response = ui.add(
+                egui::widgets::Label::new(text)
+                    .sense(Sense::click()),
+            );
+            if response.hovered() {
                 highlighted = Some(*id);
             }
-            if contains_pointer || matches!(self.highlighted, Some(hl_id) if hl_id == *id) {
-                l = l.highlight();
+            if externally_highlighted {
+                // TODO: adds an underline, not super nice
+                response = response.highlight();
             }
-            if l.clicked() {
+            if response.clicked() {
                 clicked = Some(*id);
             }
         };
@@ -619,7 +628,7 @@ impl RoamUI {
                     ui.vertical_centered(|ui| {
                         ui.label(&node.title);
                         for alias in &node.aliases {
-                            ui.label(format!("(alias {})", alias));
+                            ui.label(format!("(alias {alias})"));
                         }
                         ui.separator();
                         if !node.tags.is_empty() {
@@ -764,6 +773,11 @@ impl RoamUI {
         self.layout.to_screen.isometry.translation.y = self.view_state.offset.y;
     }
 
+    fn is_highlighted(&self, id: NodeId) -> bool {
+        matches!(&self.highlighted_graph, Some(graph_highlighted) if *graph_highlighted == id)
+            || matches!(&self.highlighted_sidebar, Some(graph_highlighted) if *graph_highlighted == id)
+    }
+
     fn render_graph(&mut self, ctx: &egui::Context) {
         let node_colors = graph_style(ctx.theme()).node;
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -807,7 +821,7 @@ impl RoamUI {
                     .pointer_latest_pos()
                     .is_some_and(|p| (p - pos).length_sq() <= radius_screen * radius_screen);
                 let (color, size) =
-                    if mouse_over || matches!(&self.highlighted, Some(id) if *id == n.graph_node_id) {
+                    if mouse_over || self.is_highlighted(n.graph_node_id) {
                         (node_colors.hover, radius_screen * 1.1)
                     } else if matches!(&self.selected.as_ref().map(|n|n.node), Some(id) if *id == n.graph_node_id) {
                         (node_colors.selected, radius_screen)
@@ -823,12 +837,9 @@ impl RoamUI {
                 );
                 if mouse_over {
                     hovered_node = Some(n.graph_node_id);
-                    self.highlighted = hovered_node;
-                } else if ui.ui_contains_pointer() {
-                    // Can't be hovering a node in the sidebar
-                    self.highlighted = None;
                 }
             }
+            self.highlighted_graph = hovered_node;
             if clicked && hovered_node.map(|n| self.select_node(n)).is_none() {
                 self.deselect_node();
             }
@@ -956,7 +967,7 @@ impl eframe::App for RoamUI {
         if filter_changed {
             self.apply_filter();
         }
-        self.highlighted = next_hl;
+        self.highlighted_sidebar = next_hl;
 
         self.render_graph(ctx);
         ctx.input(|i| self.handle_global_shortcuts(i));
