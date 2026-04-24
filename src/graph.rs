@@ -140,12 +140,12 @@ pub enum DfsDirection {
 
 impl DfsDirection {
     fn allows_out(&self) -> bool {
-        use DfsDirection::*;
+        use DfsDirection::{Both, Out};
         *self == Out || *self == Both
     }
 
     fn allows_in(&self) -> bool {
-        use DfsDirection::*;
+        use DfsDirection::{Both, In};
         *self == In || *self == Both
     }
 }

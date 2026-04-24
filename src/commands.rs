@@ -59,7 +59,7 @@ impl CommandIPC {
         F: Fn() + Send + 'static,
     {
         let s = Self {
-            commands: Default::default(),
+            commands: Arc::default(),
         };
         let handle = s.read_stdin(notify);
         (s, handle)

@@ -360,8 +360,8 @@ enum TagFilterState {
 }
 
 impl TagFilterState {
-    fn next(&self) -> Self {
-        use TagFilterState::*;
+    fn next(self) -> Self {
+        use TagFilterState::{Exclude, Exclusive, Include};
         match self {
             Include => Exclusive,
             Exclusive => Exclude,
@@ -394,7 +394,7 @@ impl TagFilter {
     }
 
     fn build_filter<'a>(&'a self) -> Box<dyn Fn(&Node) -> bool + 'a> {
-        use TagFilterState::*;
+        use TagFilterState::{Exclude, Exclusive};
         {
             let exclusive_tags: Vec<&str> = self
                 .states
@@ -590,7 +590,7 @@ impl RoamUI {
 
     fn render_selected(
         &self,
-        ui: &mut egui::Ui
+        ui: &mut egui::Ui,
     ) -> (Option<NodeId>, Option<NodeId>, Option<String>) {
         let Some(details) = &self.selected else {
             return (None, None, None);
@@ -622,42 +622,58 @@ impl RoamUI {
             .exact_size(200.)
             .resizable(false)
             .show_inside(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.label(&node.title);
-                        for alias in &node.aliases {
-                            ui.label(format!("(alias {alias})"));
-                        }
-                        ui.separator();
-                        if !node.tags.is_empty() {
-                            ui.horizontal_wrapped(|inner| {
-                                inner.label("Tags:");
-                                for (n, t) in node.tags.iter().enumerate() {
-                                    if n > 0 {
-                                        inner.separator();
-                                    }
-                                    let r = inner.label(t);
-                                    if r.contains_pointer() {
-                                        selected_tag = Some(t.clone());
-                                    }
+                ui.vertical_centered(|ui| {
+                    ui.heading(&node.title);
+                    for alias in &node.aliases {
+                        ui.label(format!("(alias {alias})"));
+                    }
+                    ui.separator();
+                    ui.horizontal_wrapped(|inner| {
+                        if node.tags.is_empty() {
+                            inner.label("No Tags");
+                        } else {
+                            inner.label("Tags:");
+                            for (n, t) in node.tags.iter().enumerate() {
+                                if n > 0 {
+                                    inner.separator();
                                 }
-                            });
-                            ui.separator();
+                                let r = inner.label(t);
+                                if r.contains_pointer() {
+                                    selected_tag = Some(t.clone());
+                                }
+                            }
                         }
-                        // ui.label(format!(
-                        //     "ID: {}, UUID: {}, links: {}, backlinks: {}",
-                        //     node.id,
-                        //     node.uuid,
-                        //     details.links.len(),
-                        //     details.backlinks.len(),
-                        // ));
-                        // ui.separator();
-                        ui.label("Links");
+                    });
+                    ui.separator();
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        let links_count = details.links.len();
+                        let backlinks_count = details.backlinks.len();
+                        match links_count {
+                            0 => {
+                                ui.heading("No Links");
+                            }
+                            1 => {
+                                ui.heading("One Link:");
+                            }
+                            _ => {
+                                ui.heading(format!("{links_count} Links:"));
+                            }
+                        }
                         for l in &details.links {
                             render_link(ui, l);
                         }
                         ui.separator();
-                        ui.label("Backlinks");
+                        match backlinks_count {
+                            0 => {
+                                ui.heading("No Backlinks");
+                            }
+                            1 => {
+                                ui.heading("One Backlink:");
+                            }
+                            _ => {
+                                ui.heading(format!("{backlinks_count} Backlinks:"));
+                            }
+                        }
                         for l in &details.backlinks {
                             render_link(ui, l);
                         }
@@ -913,37 +929,35 @@ impl eframe::App for RoamUI {
         egui::Panel::left("Filters")
             .resizable(false)
             .show_inside(ui, |ui| {
-                ui.label("Filters");
+                ui.vertical_centered(|ui| {
+                    ui.heading("Filters");
+                });
                 ui.separator();
-                let filter_res = filter_ui(ui, &mut self.filter);
-                if filter_res.changed {
-                    filter_changed = true;
-                }
-                self.additional_highlighted.clear();
-                if let Some(hovered) = filter_res.hovered_tag {
-                    self.additional_highlighted =
-                        self.graph.tags.node_ids_for(hovered).copied().collect();
-                }
-                ui.separator();
-                ui.label(format!(
-                    "Showing {} / {}",
-                    self.layout.nodes.len(),
-                    self.graph.len()
-                ));
-                ui.separator();
-                // TODO: ugly animation
-                ui.collapsing("Layout settings", |ui| self.graph_settings(ui));
-
-                egui::Panel::bottom("settings")
-                    .resizable(false)
-                    .show_inside(ui, |ui| {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::RIGHT), |ui| {
-                            egui::widgets::global_theme_preference_switch(ui);
-                            ui.with_layout(egui::Layout::left_to_right(egui::Align::LEFT), |ui| {
-                                ui.label("Theme");
-                            });
-                        });
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let filter_res = filter_ui(ui, &mut self.filter);
+                    if filter_res.changed {
+                        filter_changed = true;
+                    }
+                    self.additional_highlighted.clear();
+                    if let Some(hovered) = filter_res.hovered_tag {
+                        self.additional_highlighted =
+                            self.graph.tags.node_ids_for(hovered).copied().collect();
+                    }
+                    ui.separator();
+                    ui.label(format!(
+                        "Showing {} / {}",
+                        self.layout.nodes.len(),
+                        self.graph.len()
+                    ));
+                    ui.separator();
+                    // TODO: ugly animation
+                    ui.collapsing("Layout settings", |ui| self.graph_settings(ui));
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        egui::widgets::global_theme_preference_switch(ui);
+                        ui.label("Theme");
                     });
+                });
             });
         let (next_sel, next_hl, sel_tag) = self.render_selected(ui);
         if let Some(next_selection) = next_sel {
