@@ -6,7 +6,7 @@ mod style;
 use std::fmt::Display;
 
 use eframe::egui;
-use egui::{Color32, Sense};
+use egui::Sense;
 use graph::{Graph, Link, Node, NodeDetails, NodeId, load_graph};
 use history::History;
 use itertools::Itertools;
@@ -15,7 +15,7 @@ use rand::SeedableRng;
 use rand::distr::Uniform;
 
 use crate::commands::CommandIPC;
-use crate::style::{GRUVBOX, GraphTheme, graph_style, set_theme};
+use crate::style::{GRUVBOX, graph_style, set_theme};
 
 type Point = Point2<f32>;
 type Vector = Vector2<f32>;
@@ -57,6 +57,7 @@ struct GraphLayout {
     // Current positions
     nodes: Vec<PlacedNode>,
     links: Vec<SubgLink>,
+    #[allow(dead_code)]
     backlinks: Vec<SubgLink>,
     rng: rand::rngs::StdRng,
     to_screen: Similarity2<f32>,
@@ -94,8 +95,8 @@ impl GraphLayout {
                 (Some(from), Some(to)) => Some(SubgLink { from, to }),
                 _ => None,
             };
-        let links = graph.links().flat_map(to_subgraph_link).collect();
-        let backlinks = graph.backlinks().flat_map(to_subgraph_link).collect();
+        let links = graph.links().filter_map(to_subgraph_link).collect();
+        let backlinks = graph.backlinks().filter_map(to_subgraph_link).collect();
 
         GraphLayout {
             nodes: positioned_nodes,
@@ -321,7 +322,7 @@ impl Filter {
                 0,
             );
         }
-        let case_sensitive = title.chars().any(|c| c.is_uppercase());
+        let case_sensitive = title.chars().any(char::is_uppercase);
         let lower_title = title.to_lowercase();
         let matcher = |n: &&Node| {
             orphan_filter(n) && tag_filter(n) && {
@@ -468,7 +469,7 @@ fn filter_ui<'a>(ui: &mut egui::Ui, filter: &'a mut Filter) -> FilterResponse<'a
         let mut res: Option<&str> = None;
         for (name, state) in &mut state.states {
             if !must_filter || name.to_lowercase().contains(&filter_pat) {
-                let r = ui.label(format!("{} {}", name, state));
+                let r = ui.label(format!("{name} {state}"));
                 if r.clicked() {
                     *state = state.next();
                     changed = true;
@@ -589,7 +590,7 @@ impl RoamUI {
 
     fn render_selected(
         &self,
-        ctx: &egui::Context,
+        ui: &mut egui::Ui
     ) -> (Option<NodeId>, Option<NodeId>, Option<String>) {
         let Some(details) = &self.selected else {
             return (None, None, None);
@@ -598,16 +599,13 @@ impl RoamUI {
         let mut clicked = None;
         let mut highlighted = None;
         let node = self.graph.node(details.node).expect("node exists");
-        let hl_node_col = graph_style(ctx.theme()).node.hover;
+        let hl_node_col = graph_style(ui.ctx().theme()).node.hover;
 
         let mut render_link = |ui: &mut egui::Ui, (id, text): &(NodeId, String)| {
             let externally_highlighted =
                 matches!(self.highlighted_graph, Some(hl_id) if hl_id == *id);
             ui.style_mut().visuals.widgets.hovered.fg_stroke.color = hl_node_col;
-            let mut response = ui.add(
-                egui::widgets::Label::new(text)
-                    .sense(Sense::click()),
-            );
+            let mut response = ui.add(egui::widgets::Label::new(text).sense(Sense::click()));
             if response.hovered() {
                 highlighted = Some(*id);
             }
@@ -620,10 +618,10 @@ impl RoamUI {
             }
         };
 
-        egui::SidePanel::right("selected")
-            .exact_width(200.)
+        egui::Panel::right("selected")
+            .exact_size(200.)
             .resizable(false)
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.vertical_centered(|ui| {
                         ui.label(&node.title);
@@ -778,9 +776,9 @@ impl RoamUI {
             || matches!(&self.highlighted_sidebar, Some(graph_highlighted) if *graph_highlighted == id)
     }
 
-    fn render_graph(&mut self, ctx: &egui::Context) {
-        let node_colors = graph_style(ctx.theme()).node;
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn render_graph(&mut self, ui: &mut egui::Ui) {
+        let node_colors = graph_style(ui.ctx().theme()).node;
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             let mut clicked = false;
             if ui.ui_contains_pointer() {
                 ui.input(|i| {
@@ -795,7 +793,7 @@ impl RoamUI {
                 });
             }
 
-            let size = ctx.input(|i| i.viewport().inner_rect).map_or_else(||ui.min_size(), |r| r.max - r.min);
+            let size = ui.input(|i| i.viewport().inner_rect).map_or_else(||ui.min_size(), |r| r.max - r.min);
             if size != self.view_state.previous_size {
                 let diff = (size - self.view_state.previous_size) * 0.5;
                 self.pan_by(diff);
@@ -817,7 +815,7 @@ impl RoamUI {
 
             for n in &self.layout.nodes {
                 let pos = self.layout.pt_to_screen(n.p);
-                let mouse_over = ctx
+                let mouse_over = ui
                     .pointer_latest_pos()
                     .is_some_and(|p| (p - pos).length_sq() <= radius_screen * radius_screen);
                 let (color, size) =
@@ -844,7 +842,7 @@ impl RoamUI {
                 self.deselect_node();
             }
             let text_alpha = self.view_state.text_alpha();
-            let text_color = if ctx.theme() == egui::Theme::Dark {
+            let text_color = if ui.theme() == egui::Theme::Dark {
                 GRUVBOX.light1
             } else {
                 GRUVBOX.dark0
@@ -857,23 +855,22 @@ impl RoamUI {
                     self.node_title_in_graph(painter, n, text_color);
                 }
             }
-            if ui.ui_contains_pointer() {
-                if let Some(id) = hovered_node {
-                    let graph_node = self.graph.node(id).unwrap();
-                    egui::show_tooltip_at_pointer(
-                        ctx,
-                        painter.layer_id(),
-                        egui::Id::new("title"),
-                        |ui| {
-                            let label =
-                            egui::Label::new(&graph_node.title).wrap_mode(egui::TextWrapMode::Extend);
-                            ui.add(label);
-                        },
-                    );
-                }
+            if ui.ui_contains_pointer() && let Some(id) = hovered_node {
+                let graph_node = self.graph.node(id).unwrap();
+                egui::Tooltip::always_open(
+                    ui.ctx().clone(),
+                    painter.layer_id(),
+                    egui::Id::new("title"),
+                    egui::PopupAnchor::Pointer).show(
+                    |ui| {
+                        let label =
+                        egui::Label::new(&graph_node.title).wrap_mode(egui::TextWrapMode::Extend);
+                        ui.add(label);
+                    },
+                );
             }
             if !settled {
-                ctx.request_repaint();
+                ui.request_repaint();
             }
         });
     }
@@ -910,15 +907,12 @@ impl RoamUI {
 }
 
 impl eframe::App for RoamUI {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Q)) {
-            ctx.send_viewport_cmd(egui::viewport::ViewportCommand::Close);
-        }
-        self.process_commands(ctx);
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.process_commands(ui);
         let mut filter_changed = false;
-        egui::SidePanel::left("Filters")
+        egui::Panel::left("Filters")
             .resizable(false)
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 ui.label("Filters");
                 ui.separator();
                 let filter_res = filter_ui(ui, &mut self.filter);
@@ -940,7 +934,7 @@ impl eframe::App for RoamUI {
                 // TODO: ugly animation
                 ui.collapsing("Layout settings", |ui| self.graph_settings(ui));
 
-                egui::TopBottomPanel::bottom("settings")
+                egui::Panel::bottom("settings")
                     .resizable(false)
                     .show_inside(ui, |ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::RIGHT), |ui| {
@@ -951,7 +945,7 @@ impl eframe::App for RoamUI {
                         });
                     });
             });
-        let (next_sel, next_hl, sel_tag) = self.render_selected(ctx);
+        let (next_sel, next_hl, sel_tag) = self.render_selected(ui);
         if let Some(next_selection) = next_sel {
             self.select_node(next_selection);
         }
@@ -969,8 +963,8 @@ impl eframe::App for RoamUI {
         }
         self.highlighted_sidebar = next_hl;
 
-        self.render_graph(ctx);
-        ctx.input(|i| self.handle_global_shortcuts(i));
+        self.render_graph(ui);
+        ui.input(|i| self.handle_global_shortcuts(i));
     }
 }
 

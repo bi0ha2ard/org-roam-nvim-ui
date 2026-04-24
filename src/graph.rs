@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Write,
     ops::Range,
 };
 
@@ -358,21 +359,23 @@ impl Graph {
         let mut res = String::new();
         res.push_str("digraph {");
         for n in &self.nodes {
-            res.push_str(&format!("\"{}\";\n", n.title));
+            let _ = writeln!(&mut res, "\"{}\";", n.title);
         }
         for l in &self.links {
-            res.push_str(&format!(
-                "\"{}\" -> \"{}\" [color=blue];\n",
+            let _ = writeln!(
+                res,
+                "\"{}\" -> \"{}\" [color=blue];",
                 self.node(l.from).unwrap().title,
                 self.node(l.to).unwrap().title
-            ));
+            );
         }
         for l in &self.backlinks {
-            res.push_str(&format!(
-                "\"{}\" -> \"{}\" [color=red];\n",
+            let _ = writeln!(
+                res,
+                "\"{}\" -> \"{}\" [color=red];",
                 self.node(l.from).unwrap().title,
                 self.node(l.to).unwrap().title
-            ));
+            );
         }
         res.push('}');
         res

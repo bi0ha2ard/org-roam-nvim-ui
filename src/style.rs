@@ -43,8 +43,9 @@
 // faded_aqua       #427b58   [   ]  [aqua]   66 [  ][14]    66-123- 88    53-106- 70   #356a46
 // faded_orange     #af3a03   [   ][orange]  130 [  ][  ]   175- 58-  3   157- 40-  7   #9d2807
 
-use egui::{Color32, Grid, style};
+use egui::Color32;
 
+#[allow(dead_code)]
 pub struct Theme {
     pub dark0_hard: Color32,
     pub dark0: Color32,
@@ -246,6 +247,8 @@ fn set_dark_theme(style: &mut egui::style::Style) {
 
     style.visuals.window_shadow.color = GRUVBOX.dark0_hard;
     style.visuals.popup_shadow.color = GRUVBOX.dark0_hard;
+
+    style.visuals.slider_trailing_fill = true;
 }
 
 pub fn set_theme(theme: egui::Theme, style: &mut egui::style::Style) {
