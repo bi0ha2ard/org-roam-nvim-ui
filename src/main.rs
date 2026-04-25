@@ -159,7 +159,7 @@ impl GraphLayout {
 
     /// simulate one tick
     /// Note: dt makes this frame-rate independent, but it also results in non-repeatable
-    /// simulatino granularity, so maybe that's not a good idea anyway.
+    /// simulation granularity, so maybe that's not a good idea anyway.
     fn tick(&mut self, dt: f64) -> bool {
         const T_UNDAMPED: f64 = 2.0;
         const T_SCALE: f64 = 10.;
@@ -265,7 +265,7 @@ impl Default for GraphViewState {
 
 impl GraphViewState {
     fn text_alpha(&self) -> f32 {
-        ((self.zoom - 10.) / 20.).clamp(0., 1.)
+        ((self.zoom - 5.) / 20.).clamp(0., 1.)
     }
 }
 
@@ -833,7 +833,10 @@ impl RoamUI {
                 desired_dist: self.view_state.desired_dist
             });
             let dt = f64::from(ui.input(|i|i.stable_dt));
+
+            // TODO(perf): run this in the background. In debug builds it's rather laggy
             let settled = self.layout.double_tick(dt);
+
             let mut hovered_node = None;
             let radius_screen = self.layout.len_to_screen(RADIUS);
 
