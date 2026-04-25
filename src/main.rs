@@ -284,6 +284,7 @@ impl Filter {
             .tags
             .all_tags()
             .map(|(t, _)| (t.to_string(), TagFilterState::Include))
+            .sorted_by(|a, b| a.0.cmp(&b.0))
             .collect();
         Self {
             node_title: String::new(),
