@@ -1002,5 +1002,6 @@ fn main() {
         "org-roam-nvim-ui",
         native_options,
         Box::new(|cc| Ok(Box::new(RoamUI::new(cc)))),
-    );
+    )
+    .map_err(|e| eprintln!("Failed to run: {e:?}"));
 }

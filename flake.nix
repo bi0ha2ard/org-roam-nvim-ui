@@ -11,13 +11,16 @@
         pkgs = nixpkgs.legacyPackages.${system};
         craneLib = crane.mkLib pkgs;
         libPath = with pkgs; lib.makeLibraryPath [
-          libGL
           libxkbcommon
+          vulkan-loader
           wayland
-          xorg.libX11
-          xorg.libXcursor
-          xorg.libXi
-          xorg.libXrandr
+          libGL
+          libGLU
+          libGLX
+          mesa
+          libXcursor
+          libXi
+          libX11
         ];
       in
     {
@@ -39,7 +42,7 @@
 
       devShell = craneLib.devShell {
         packages = [
-          pkgs.xorg.libxcb
+          pkgs.libxcb
         ];
         RUST_SRC_PATH = pkgs.rustPlatform.rustLibSrc;
         LD_LIBRARY_PATH = libPath;
